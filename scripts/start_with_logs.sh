@@ -73,9 +73,9 @@ start_service() {
     tail -f "$LOG_FILE" 2>/dev/null &
     TAIL_PID=$!
 
-    # Wait for startup indicators (max 60 seconds)
+    # Wait for startup indicators (max 180 seconds for TTS model loading)
     local waited=0
-    local max_wait=60
+    local max_wait=180
 
     while [ $waited -lt $max_wait ]; do
         if [ -f "$LOG_FILE" ]; then
@@ -101,8 +101,13 @@ start_service() {
             fi
         fi
 
-        sleep 2
-        waited=$((waited + 2))
+        sleep 5
+        waited=$((waited + 5))
+
+        # Show progress every 15 seconds
+        if [ $((waited % 15)) -eq 0 ]; then
+            echo -e "${YELLOW}  ... still loading ($waited/${max_wait}s)${NC}"
+        fi
     done
 
     # Timeout
