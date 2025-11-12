@@ -53,7 +53,7 @@ class TTSService:
         self,
         model_path: Optional[str] = None,
         device: str = "cuda",
-        device_index: int = 1,  # GPU 1 for TTS
+        device_index: int = 0,  # Use device 0 (controlled by CUDA_VISIBLE_DEVICES)
         chunk_size: int = 50,
         max_connections: int = 50,
     ):
@@ -371,9 +371,10 @@ async def startup():
     """Initialize service on startup"""
     global service
 
-    # Get GPU index from environment or default to 1
+    # When CUDA_VISIBLE_DEVICES is set, always use device 0
+    # (the startup script controls which physical GPU is visible)
     import os
-    device_index = int(os.getenv("CUDA_VISIBLE_DEVICES", "1"))
+    device_index = 0
 
     service = TTSService(
         model_path=None,  # Set path to Chatterbox model if needed

@@ -356,9 +356,10 @@ async def startup():
     """Initialize service on startup"""
     global service
 
-    # Get GPU index from environment or default to 0
+    # When CUDA_VISIBLE_DEVICES is set, always use device 0
+    # (the startup script controls which physical GPU is visible)
     import os
-    device_index = int(os.getenv("CUDA_VISIBLE_DEVICES", "0"))
+    device_index = 0
 
     service = ASRService(
         model_name="large-v3",
