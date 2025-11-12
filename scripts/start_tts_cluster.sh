@@ -22,8 +22,8 @@ for i in "${!PORTS[@]}"; do
     echo "Starting TTS instance $INSTANCE_ID on port $PORT..."
 
     # Set environment variables and start
-    # Add CUDA libraries to LD_LIBRARY_PATH
-    CUDA_LIBS=$(python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+    # Try to get CUDA libs path, fall back if fails
+    CUDA_LIBS=$(python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || echo "")
 
     CUDA_VISIBLE_DEVICES=$GPU_ID \
     TTS_PORT=$PORT \
