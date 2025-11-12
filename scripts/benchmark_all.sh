@@ -18,14 +18,32 @@ echo ""
 echo "Benchmarking both ASR and TTS services..."
 echo ""
 
-# Parse arguments for URL/host
-ASR_URL="${ASR_URL:-http://localhost}"
-TTS_URL="${TTS_URL:-http://localhost}"
-ASR_HOST="${ASR_HOST:-localhost}"
-TTS_HOST="${TTS_HOST:-localhost}"
+# Parse arguments
+DIRECT_MODE=false
+if [ "$1" = "--direct" ]; then
+    DIRECT_MODE=true
+    shift
+fi
+
+# Configure URLs
+if [ "$DIRECT_MODE" = true ]; then
+    # Test backend services directly (bypass nginx)
+    ASR_URL="${ASR_URL:-http://localhost:8001}"
+    TTS_URL="${TTS_URL:-http://localhost:8002}"
+    ASR_HOST="${ASR_HOST:-localhost}"
+    TTS_HOST="${TTS_HOST:-localhost}"
+    echo -e "${YELLOW}Direct mode: Testing backend services${NC}"
+else
+    # Test through nginx
+    ASR_URL="${ASR_URL:-http://localhost}"
+    TTS_URL="${TTS_URL:-http://localhost}"
+    ASR_HOST="${ASR_HOST:-localhost}"
+    TTS_HOST="${TTS_HOST:-localhost}"
+fi
+
 ITERATIONS="${ITERATIONS:-5}"
 
-# Check if remote URL provided
+# Check if remote URL provided as argument
 if [ "$1" ]; then
     ASR_URL="$1"
     TTS_URL="$1"

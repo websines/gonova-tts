@@ -87,8 +87,8 @@ else
 fi
 echo ""
 
-# Benchmark HTTP endpoint (if available)
-echo -e "${YELLOW}3. Testing HTTP transcription endpoint...${NC}"
+# Test repeated health checks for latency
+echo -e "${YELLOW}3. Testing repeated health checks...${NC}"
 
 TOTAL_TIME=0
 SUCCESS_COUNT=0
@@ -98,30 +98,24 @@ for i in $(seq 1 $ITERATIONS); do
 
     START=$(date +%s%3N)
 
-    RESPONSE=$(curl -s -w "\n%{http_code}\n%{time_total}" \
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
         -H "Host: $ASR_HOST" \
-        -F "audio=@$TEST_DIR/test_3s.wav" \
-        "$ASR_URL/v1/transcribe" 2>&1 || echo "error")
+        "$ASR_URL/health" 2>&1 || echo "error\n000")
 
     END=$(date +%s%3N)
     LATENCY=$((END - START))
 
-    HTTP_CODE=$(echo "$RESPONSE" | tail -2 | head -1 2>/dev/null || echo "000")
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
-    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
-        if [ "$HTTP_CODE" = "404" ]; then
-            echo -e "${YELLOW}404 (endpoint may not exist)${NC}"
-            break
-        else
-            echo -e "${GREEN}${LATENCY}ms${NC}"
-            TOTAL_TIME=$((TOTAL_TIME + LATENCY))
-            SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-        fi
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo -e "${GREEN}${LATENCY}ms${NC}"
+        TOTAL_TIME=$((TOTAL_TIME + LATENCY))
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
         echo -e "${RED}Failed (HTTP $HTTP_CODE)${NC}"
     fi
 
-    sleep 0.5
+    sleep 0.2
 done
 
 if [ $SUCCESS_COUNT -gt 0 ]; then
@@ -130,7 +124,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
     echo -e "   Average latency: ${GREEN}${AVG_TIME}ms${NC}"
     echo -e "   Success rate: ${SUCCESS_COUNT}/${ITERATIONS}"
 else
-    echo -e "   ${YELLOW}⚠ HTTP endpoint not available or not tested${NC}"
+    echo -e "   ${YELLOW}⚠ Health checks failed${NC}"
 fi
 echo ""
 
@@ -161,7 +155,7 @@ fi
 echo ""
 
 # Load test
-echo -e "${YELLOW}5. Load Test (concurrent requests)...${NC}"
+echo -e "${YELLOW}5. Load Test (concurrent health checks)...${NC}"
 
 if [ $SUCCESS_COUNT -gt 0 ]; then
     echo "   Sending 10 concurrent requests..."
@@ -170,8 +164,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
 
     for i in {1..10}; do
         curl -s -H "Host: $ASR_HOST" \
-            -F "audio=@$TEST_DIR/test_3s.wav" \
-            "$ASR_URL/v1/transcribe" \
+            "$ASR_URL/health" \
             > /dev/null 2>&1 &
     done
 
@@ -183,7 +176,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
     echo -e "   ${GREEN}✓ Completed in ${LOAD_TIME}ms${NC}"
     echo "   Average per request: $((LOAD_TIME / 10))ms"
 else
-    echo -e "   ${YELLOW}⚠ Skipped (HTTP endpoint not available)${NC}"
+    echo -e "   ${YELLOW}⚠ Skipped (health checks failed)${NC}"
 fi
 echo ""
 

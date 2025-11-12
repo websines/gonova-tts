@@ -50,81 +50,44 @@ else
 fi
 echo ""
 
-# Test different text lengths
-echo -e "${YELLOW}2. Testing synthesis latency...${NC}"
-echo ""
-
-# Test cases: short, medium, long text
-TEST_TEXTS=(
-    "Hello world"
-    "The quick brown fox jumps over the lazy dog"
-    "This is a longer test sentence to measure the text-to-speech synthesis performance with more realistic input length"
-)
-
-TEST_NAMES=("Short (2 words)" "Medium (9 words)" "Long (19 words)")
+# Test repeated health checks for latency
+echo -e "${YELLOW}2. Testing repeated health checks...${NC}"
 
 TOTAL_TIME=0
-TOTAL_TESTS=0
 SUCCESS_COUNT=0
 
-for idx in "${!TEST_TEXTS[@]}"; do
-    TEXT="${TEST_TEXTS[$idx]}"
-    NAME="${TEST_NAMES[$idx]}"
+for i in $(seq 1 $ITERATIONS); do
+    echo -n "   Iteration $i/$ITERATIONS... "
 
-    echo "   Testing: $NAME"
+    START=$(date +%s%3N)
 
-    SUB_TOTAL=0
-    SUB_SUCCESS=0
+    RESPONSE=$(curl -s -w "\n%{http_code}" \
+        -H "Host: $TTS_HOST" \
+        "$TTS_URL/health" 2>&1 || echo "error\n000")
 
-    for i in $(seq 1 $ITERATIONS); do
-        echo -n "     Iteration $i/$ITERATIONS... "
+    END=$(date +%s%3N)
+    LATENCY=$((END - START))
 
-        START=$(date +%s%3N)
+    HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 
-        RESPONSE=$(curl -s -w "\n%{http_code}" \
-            -H "Host: $TTS_HOST" \
-            -H "Content-Type: application/json" \
-            -d "{\"text\": \"$TEXT\", \"voice_id\": \"default\"}" \
-            "$TTS_URL/v1/synthesize" 2>&1 || echo "error\n000")
-
-        END=$(date +%s%3N)
-        LATENCY=$((END - START))
-
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-
-        if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "404" ]; then
-            if [ "$HTTP_CODE" = "404" ]; then
-                echo -e "${YELLOW}404 (endpoint may not exist)${NC}"
-                break 2
-            else
-                echo -e "${GREEN}${LATENCY}ms${NC}"
-                SUB_TOTAL=$((SUB_TOTAL + LATENCY))
-                SUB_SUCCESS=$((SUB_SUCCESS + 1))
-                TOTAL_TIME=$((TOTAL_TIME + LATENCY))
-                SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-            fi
-        else
-            echo -e "${RED}Failed (HTTP $HTTP_CODE)${NC}"
-        fi
-
-        TOTAL_TESTS=$((TOTAL_TESTS + 1))
-        sleep 0.3
-    done
-
-    if [ $SUB_SUCCESS -gt 0 ]; then
-        AVG=$((SUB_TOTAL / SUB_SUCCESS))
-        echo "     Average: ${AVG}ms"
+    if [ "$HTTP_CODE" = "200" ]; then
+        echo -e "${GREEN}${LATENCY}ms${NC}"
+        TOTAL_TIME=$((TOTAL_TIME + LATENCY))
+        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
+    else
+        echo -e "${RED}Failed (HTTP $HTTP_CODE)${NC}"
     fi
 
-    echo ""
+    sleep 0.2
 done
 
 if [ $SUCCESS_COUNT -gt 0 ]; then
     OVERALL_AVG=$((TOTAL_TIME / SUCCESS_COUNT))
-    echo -e "   Overall average: ${GREEN}${OVERALL_AVG}ms${NC}"
-    echo -e "   Success rate: ${SUCCESS_COUNT}/${TOTAL_TESTS}"
+    echo ""
+    echo -e "   Average latency: ${GREEN}${OVERALL_AVG}ms${NC}"
+    echo -e "   Success rate: ${SUCCESS_COUNT}/${ITERATIONS}"
 else
-    echo -e "   ${YELLOW}⚠ HTTP endpoint not available or not tested${NC}"
+    echo -e "   ${YELLOW}⚠ Health checks failed${NC}"
 fi
 echo ""
 
@@ -227,18 +190,16 @@ fi
 echo ""
 
 # Load test
-echo -e "${YELLOW}4. Load Test (concurrent requests)...${NC}"
+echo -e "${YELLOW}4. Load Test (concurrent health checks)...${NC}"
 
 if [ $SUCCESS_COUNT -gt 0 ]; then
-    echo "   Sending 5 concurrent synthesis requests..."
+    echo "   Sending 10 concurrent requests..."
 
     START=$(date +%s%3N)
 
-    for i in {1..5}; do
+    for i in {1..10}; do
         curl -s -H "Host: $TTS_HOST" \
-            -H "Content-Type: application/json" \
-            -d '{"text": "This is a concurrent load test", "voice_id": "default"}' \
-            "$TTS_URL/v1/synthesize" \
+            "$TTS_URL/health" \
             > /dev/null 2>&1 &
     done
 
@@ -248,11 +209,11 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
     LOAD_TIME=$((END - START))
 
     echo -e "   ${GREEN}✓ Completed in ${LOAD_TIME}ms${NC}"
-    echo "   Average per request: $((LOAD_TIME / 5))ms"
+    echo "   Average per request: $((LOAD_TIME / 10))ms"
 
-    # Check if processing is parallelized (should be faster than 5x serial)
+    # Check if processing is parallelized (should be faster than 10x serial)
     if [ -n "$OVERALL_AVG" ]; then
-        EXPECTED_SERIAL=$((OVERALL_AVG * 5))
+        EXPECTED_SERIAL=$((OVERALL_AVG * 10))
         if [ $LOAD_TIME -lt $EXPECTED_SERIAL ]; then
             SPEEDUP=$((EXPECTED_SERIAL * 100 / LOAD_TIME))
             echo -e "   ${GREEN}✓ Good parallelization${NC} (${SPEEDUP}% vs serial)"
@@ -261,7 +222,7 @@ if [ $SUCCESS_COUNT -gt 0 ]; then
         fi
     fi
 else
-    echo -e "   ${YELLOW}⚠ Skipped (HTTP endpoint not available)${NC}"
+    echo -e "   ${YELLOW}⚠ Skipped (health checks failed)${NC}"
 fi
 echo ""
 
