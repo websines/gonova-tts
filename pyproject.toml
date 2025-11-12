@@ -21,6 +21,7 @@ dependencies = [
 
     # TTS dependencies (will need manual install from GitHub)
     # chatterbox-streaming - install separately
+    "tokenizers>=0.20,<0.21",  # Pin for chatterbox compatibility
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",
