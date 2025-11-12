@@ -23,9 +23,13 @@ for i in "${!PORTS[@]}"; do
     echo "Starting ASR instance $INSTANCE_ID on port $PORT..."
 
     # Set environment variables and start
+    # Add CUDA libraries to LD_LIBRARY_PATH
+    CUDA_LIBS=$(python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))")
+
     CUDA_VISIBLE_DEVICES=$GPU_ID \
     ASR_PORT=$PORT \
     ASR_INSTANCE_ID=$INSTANCE_ID \
+    LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH" \
     nohup uv run python services/asr/server.py \
         > logs/asr/instance_${INSTANCE_ID}_${PORT}.log 2>&1 &
 
