@@ -1,0 +1,59 @@
+# TTS Service Configuration
+
+# Model settings
+model:
+  # Path to Chatterbox model (install from GitHub)
+  model_path: null  # Will use default if not specified
+  device: "cuda"
+  device_index: 1    # GPU 1 (second 3090)
+  chunk_size: 50     # Tokens per audio chunk (25-100)
+  sample_rate: 24000
+
+# Voice cloning
+voice_cloning:
+  enabled: true
+  cache_dir: "./voices"
+  max_cached_voices: 100
+
+  # Reference audio requirements
+  min_duration: 3.0   # seconds
+  max_duration: 10.0  # seconds
+  min_snr: 5.0        # Signal-to-noise ratio
+
+# Synthesis parameters
+synthesis:
+  default_exaggeration: 0.5  # Emotion intensity (0.0-1.0+)
+  default_cfg_weight: 3.0    # Guidance weight
+  enable_streaming: true
+
+# Server settings
+server:
+  host: "0.0.0.0"
+  port: 8002
+  max_connections: 50
+  connection_timeout: 300    # seconds
+
+# Queue settings
+queues:
+  input_queue_size: 500      # Synthesis requests
+  output_queue_size: 2000    # Audio chunks (larger for audio)
+
+# Rate limiting
+rate_limiting:
+  enabled: true
+  max_requests_per_minute: 100
+  window_seconds: 60
+
+# Logging
+logging:
+  level: "INFO"
+  format: "json"
+  file: "./logs/tts.log"
+
+  log_syntheses: true
+  log_voice_registrations: true
+
+# Monitoring
+monitoring:
+  enable_health_endpoint: true
+  enable_metrics_endpoint: true

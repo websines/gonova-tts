@@ -1,0 +1,87 @@
+[project]
+name = "voice-agent"
+version = "0.1.0"
+description = "Modular voice agent with separate ASR and TTS microservices"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+    # Core web framework
+    "fastapi>=0.109.0",
+    "uvicorn[standard]>=0.27.0",
+    "websockets>=12.0",
+    "python-multipart>=0.0.9",
+
+    # ASR dependencies
+    "faster-whisper>=1.0.0",
+    "onnxruntime>=1.16.0",
+    "soundfile>=0.12.0",
+    "librosa>=0.10.0",
+
+    # TTS dependencies (will need manual install from GitHub)
+    # chatterbox-streaming - install separately
+
+    # PyTorch (CUDA version recommended)
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+
+    # Audio processing
+    "numpy>=1.24.0",
+    "scipy>=1.11.0",
+    "pydub>=0.25.0",
+
+    # Utilities
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+
+    # Monitoring & logging
+    "structlog>=24.1.0",
+    "prometheus-client>=0.19.0",
+
+    # Optional: Redis for caching
+    "redis>=5.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.7.0",
+    "httpx>=0.26.0",
+]
+
+phone = [
+    "twilio>=8.0.0",
+]
+
+cloud = [
+    "boto3>=1.34.0",  # AWS
+    "google-cloud-storage>=2.10.0",  # GCP
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.black]
+line-length = 100
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
