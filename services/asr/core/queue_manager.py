@@ -290,6 +290,20 @@ class ASRQueueManager:
             self.metrics['active_connections'] = len(self.output_queues)
             logger.info(f"Unregistered connection {connection_id}")
 
+    async def wait_until_empty(self, timeout: float = 30.0):
+        """Wait until all queues are empty before shutdown"""
+        start_time = time.time()
+
+        while time.time() - start_time < timeout:
+            if (self.input_queue.qsize() == 0 and
+                self.processing_queue.qsize() == 0):
+                logger.info("All queues empty, ready for shutdown")
+                return
+
+            await asyncio.sleep(0.5)
+
+        logger.warning(f"Timeout waiting for queues to empty after {timeout}s")
+
     def get_metrics(self) -> dict:
         """Get current queue metrics"""
         return {
