@@ -97,7 +97,8 @@ class StreamingSynthesizer:
             # Warm up GPU with dummy synthesis
             logger.info("Warming up GPU...")
             dummy_text = "Hello, this is a test."
-            _ = await self._synthesize_sync(dummy_text, chunk_size=25)
+            loop = asyncio.get_event_loop()
+            _ = await loop.run_in_executor(None, self._synthesize_sync, dummy_text)
 
             load_time = time.time() - start_time
             logger.info(f"Model loaded in {load_time:.2f}s")
