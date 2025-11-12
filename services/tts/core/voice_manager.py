@@ -45,8 +45,8 @@ class VoiceManager:
         self.max_cached = max_cached
         self.synthesizer = synthesizer
 
-        # In-memory cache
-        self.voice_cache: Dict[str, torch.Tensor] = {}
+        # In-memory cache (voice_id -> file_path)
+        self.voice_cache: Dict[str, str] = {}
         self.voice_metadata: Dict[str, dict] = {}
 
         # Stats
@@ -63,7 +63,7 @@ class VoiceManager:
         voice_id: str,
         reference_audio_b64: str,
         description: str = "",
-    ) -> torch.Tensor:
+    ) -> str:
         """
         Register a new voice from reference audio.
 
@@ -73,24 +73,21 @@ class VoiceManager:
             description: Optional description
 
         Returns:
-            torch.Tensor: Voice embedding
+            str: Path to saved reference audio
 
         Raises:
             ValueError: If audio quality is insufficient
         """
-        if self.synthesizer is None:
-            raise RuntimeError("Synthesizer not set")
-
         try:
             # Decode base64 audio
             audio_bytes = base64.b64decode(reference_audio_b64)
 
-            # Save temporarily
-            temp_path = f"/tmp/{voice_id}_ref.wav"
+            # Load audio to validate
+            temp_path = f"/tmp/{voice_id}_temp.wav"
             with open(temp_path, 'wb') as f:
                 f.write(audio_bytes)
 
-            # Load audio
+            # Load audio for validation
             audio, sr = sf.read(temp_path)
 
             # Validate audio quality
@@ -98,26 +95,19 @@ class VoiceManager:
             if not validation['valid']:
                 raise ValueError(f"Invalid reference audio: {validation['reason']}")
 
-            # Convert to float32 mono
-            if len(audio.shape) > 1:
-                audio = audio.mean(axis=1)
-            audio = audio.astype(np.float32)
+            # Save permanently to voices directory
+            voice_path = self.cache_dir / f"{voice_id}.wav"
+            with open(voice_path, 'wb') as f:
+                f.write(audio_bytes)
 
-            # Extract voice embedding
-            logger.info(f"Extracting voice embedding for {voice_id}")
-            embedding = await self.synthesizer.extract_voice_embedding(audio, sr)
-
-            # Cache to disk
-            cache_path = self.cache_dir / f"{voice_id}.pt"
-            torch.save(embedding, cache_path)
-
-            # Cache in memory
-            self.voice_cache[voice_id] = embedding
+            # Store metadata
+            self.voice_cache[voice_id] = str(voice_path)  # Store path, not embedding
             self.voice_metadata[voice_id] = {
                 'description': description,
                 'duration': len(audio) / sr,
                 'sample_rate': sr,
-                'created_at': torch.tensor(asyncio.get_event_loop().time()),
+                'path': str(voice_path),
+                'created_at': asyncio.get_event_loop().time(),
             }
 
             # Cleanup LRU if cache too large
@@ -126,16 +116,16 @@ class VoiceManager:
 
             self.stats['registrations'] += 1
 
-            logger.info(f"Voice {voice_id} registered successfully")
-            return embedding
+            logger.info(f"Voice {voice_id} registered at {voice_path}")
+            return str(voice_path)
 
         except Exception as e:
             logger.error(f"Voice registration failed: {e}")
             raise
 
-    async def get_voice(self, voice_id: str) -> Optional[torch.Tensor]:
+    async def get_voice(self, voice_id: str) -> Optional[str]:
         """
-        Get voice embedding.
+        Get voice reference audio path.
 
         Checks memory cache → disk cache → returns None if not found.
 
@@ -143,7 +133,7 @@ class VoiceManager:
             voice_id: Voice identifier
 
         Returns:
-            torch.Tensor or None
+            str: Path to voice WAV file, or None if not found
         """
         # Check memory cache
         if voice_id in self.voice_cache:
@@ -151,16 +141,13 @@ class VoiceManager:
             return self.voice_cache[voice_id]
 
         # Check disk cache
-        cache_path = self.cache_dir / f"{voice_id}.pt"
-        if cache_path.exists():
-            try:
-                embedding = torch.load(cache_path)
-                self.voice_cache[voice_id] = embedding
-                self.stats['cache_hits'] += 1
-                logger.debug(f"Loaded voice {voice_id} from disk")
-                return embedding
-            except Exception as e:
-                logger.error(f"Failed to load voice {voice_id}: {e}")
+        voice_path = self.cache_dir / f"{voice_id}.wav"
+        if voice_path.exists():
+            # Cache the path
+            self.voice_cache[voice_id] = str(voice_path)
+            self.stats['cache_hits'] += 1
+            logger.debug(f"Found voice {voice_id} at {voice_path}")
+            return str(voice_path)
 
         # Not found
         self.stats['cache_misses'] += 1
@@ -176,13 +163,14 @@ class VoiceManager:
         """
         voices = []
 
-        # Check disk cache
-        for voice_file in self.cache_dir.glob("*.pt"):
+        # Check disk cache for WAV files
+        for voice_file in self.cache_dir.glob("*.wav"):
             voice_id = voice_file.stem
 
             voice_info = {
                 'voice_id': voice_id,
                 'description': self.voice_metadata.get(voice_id, {}).get('description', ''),
+                'path': str(voice_file),
                 'is_cached': voice_id in self.voice_cache,
             }
 
@@ -247,6 +235,6 @@ class VoiceManager:
     def get_stats(self) -> dict:
         """Get voice manager statistics"""
         stats = self.stats.copy()
-        stats['total_voices'] = len(list(self.cache_dir.glob("*.pt")))
+        stats['total_voices'] = len(list(self.cache_dir.glob("*.wav")))
         stats['cached_in_memory'] = len(self.voice_cache)
         return stats

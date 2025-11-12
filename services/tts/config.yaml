@@ -15,6 +15,9 @@ voice_cloning:
   cache_dir: "./voices"
   max_cached_voices: 100
 
+  # Default voice (set to null to use Chatterbox's built-in voice)
+  default_voice_path: "./voices/urek.wav"  # Path to default voice reference audio
+
   # Reference audio requirements
   min_duration: 3.0   # seconds
   max_duration: 10.0  # seconds

@@ -84,18 +84,15 @@ class StreamingSynthesizer:
         try:
             # Import Chatterbox (must be installed separately)
             try:
-                from chatterbox_streaming import ChatterboxStreaming
+                from chatterbox.tts import ChatterboxTTS
             except ImportError:
                 raise ImportError(
                     "chatterbox-streaming not installed. "
                     "Install from: https://github.com/davidbrowne17/chatterbox-streaming"
                 )
 
-            # Load model
-            self.model = ChatterboxStreaming(
-                model_path=self.model_path,
-                device=self.device,
-            )
+            # Load model using from_pretrained
+            self.model = ChatterboxTTS.from_pretrained(device=self.device)
 
             # Warm up GPU with dummy synthesis
             logger.info("Warming up GPU...")
@@ -196,29 +193,25 @@ class StreamingSynthesizer:
         # Run in executor to avoid blocking
         loop = asyncio.get_event_loop()
 
-        # This is a placeholder for the actual Chatterbox streaming API
-        # Adjust based on actual library interface
+        # Use Chatterbox streaming API
         try:
-            # Example (adjust to actual API):
-            audio_generator = self.model.stream_generate(
-                text=text,
-                audio_prompt=voice_embedding,
+            # Chatterbox uses generate_stream which yields (audio_chunk, metrics)
+            for audio_chunk, metrics in self.model.generate_stream(
+                text,
+                audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
                 chunk_size=chunk_size,
                 exaggeration=exaggeration,
                 cfg_weight=3.0,
-            )
-
-            # Yield chunks
-            for audio_chunk in audio_generator:
-                # Convert to numpy if needed
+            ):
+                # audio_chunk is already a torch.Tensor
                 if isinstance(audio_chunk, torch.Tensor):
                     audio_chunk = audio_chunk.cpu().numpy()
 
                 yield audio_chunk
 
-        except AttributeError:
+        except Exception as e:
             # Fallback: Non-streaming synthesis
-            logger.warning("Streaming not supported, using full synthesis")
+            logger.warning(f"Streaming failed ({e}), using full synthesis")
             audio = await loop.run_in_executor(
                 None,
                 self._synthesize_sync,
@@ -240,13 +233,11 @@ class StreamingSynthesizer:
     ) -> np.ndarray:
         """
         Synchronous full synthesis (fallback).
-
-        NOTE: Adjust to actual Chatterbox API.
         """
-        # Placeholder - adjust to actual API
-        audio = self.model.synthesize(
-            text=text,
-            audio_prompt=voice_embedding,
+        # Use Chatterbox generate method
+        audio = self.model.generate(
+            text,
+            audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
             exaggeration=exaggeration,
         )
 
