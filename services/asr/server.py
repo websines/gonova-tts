@@ -366,7 +366,7 @@ async def startup():
         device="cuda",
         device_index=device_index,
         compute_type="float16",
-        vad_model_path=None,  # Set path to Smart Turn model if available
+        vad_model_path="/mnt/d/voice-system/gonova-asr-tts/models/smart-turn-v3.0.onnx",
         max_connections=50,
     )
 

@@ -92,14 +92,17 @@ class HybridVAD:
                 'method': 'noise_gate'
             }
 
-        # Primary: Try Smart Turn v3
+        # Use Smart Turn v3 only (no fallback)
         if self.smart_turn:
-            result = await self._smart_turn_detect(audio, now)
-            if result['turn_ended']:
-                return result
+            return await self._smart_turn_detect(audio, now)
 
-        # Fallback: Silence timeout
-        return self._fallback_detect(audio, now)
+        # If Smart Turn not loaded, return no turn end detected
+        return {
+            'turn_ended': False,
+            'has_speech': True,
+            'confidence': 0.0,
+            'method': 'no_vad'
+        }
 
     async def _smart_turn_detect(self, audio: np.ndarray, now: float) -> dict:
         """Smart Turn v3 semantic detection"""
