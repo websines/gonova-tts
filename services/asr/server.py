@@ -29,7 +29,7 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.audio_processor import AudioProcessor, AudioBuffer
-from core.vad import HybridVAD
+from core.vad_improved import ImprovedVAD
 from core.transcriber import StreamingTranscriber
 from core.queue_manager import ASRQueueManager, AudioChunk, TranscriptionResult
 
@@ -67,7 +67,7 @@ class ASRService:
 
         # Components
         self.audio_processor = AudioProcessor()
-        self.vad = HybridVAD(model_path=vad_model_path)
+        self.vad = ImprovedVAD(smart_turn_model_path=vad_model_path)
         self.transcriber = StreamingTranscriber(
             model_name=model_name,
             device=device,

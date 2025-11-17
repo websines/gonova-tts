@@ -28,8 +28,8 @@ class HybridVAD:
         self,
         model_path: Optional[str] = None,
         silence_timeout: float = 1.5,
-        min_speech_duration: float = 0.8,
-        confidence_threshold: float = 0.7,
+        min_speech_duration: float = 0.3,  # Reduced from 0.8
+        confidence_threshold: float = 0.5,  # Reduced from 0.7 (more sensitive)
         min_snr: float = 0.3,
     ):
         """
