@@ -1,6 +1,6 @@
 #!/bin/bash
 # Interactive startup script with live log output
-# Starts services and shows logs in real-time
+# Starts TTS service and shows logs in real-time
 
 set -e
 
@@ -12,18 +12,16 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-GPU_ASR=0
-GPU_TTS=1
-ASR_PORTS=(8001 8011)
+GPU_TTS=0
 TTS_PORTS=(8002 8012)
 
 echo -e "${BLUE}=========================================${NC}"
-echo -e "${BLUE}Voice Agent Cluster - Interactive Start${NC}"
+echo -e "${BLUE}TTS Service - Interactive Start${NC}"
 echo -e "${BLUE}=========================================${NC}"
 echo ""
 
 # Create logs directory
-mkdir -p logs/asr logs/tts
+mkdir -p logs/tts
 
 # Function to start a service and tail its log
 start_service() {
@@ -37,30 +35,17 @@ start_service() {
     # Get CUDA libs path
     CUDA_LIBS=$(python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || echo "")
 
-    # Start service in background
-    if [ "$service" = "ASR" ]; then
-        CUDA_VISIBLE_DEVICES=$gpu_id \
-        ASR_PORT=$port \
-        ASR_INSTANCE_ID=$instance_id \
-        LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH" \
-        uv run python services/asr/server.py \
-            > logs/asr/instance_${instance_id}_${port}.log 2>&1 &
+    # Start TTS service in background
+    CUDA_VISIBLE_DEVICES=$gpu_id \
+    TTS_PORT=$port \
+    TTS_INSTANCE_ID=$instance_id \
+    LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH" \
+    uv run python services/tts/server.py \
+        > logs/tts/instance_${instance_id}_${port}.log 2>&1 &
 
-        PID=$!
-        echo $PID > logs/asr/instance_${instance_id}.pid
-        LOG_FILE="logs/asr/instance_${instance_id}_${port}.log"
-    else
-        CUDA_VISIBLE_DEVICES=$gpu_id \
-        TTS_PORT=$port \
-        TTS_INSTANCE_ID=$instance_id \
-        LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH" \
-        uv run python services/tts/server.py \
-            > logs/tts/instance_${instance_id}_${port}.log 2>&1 &
-
-        PID=$!
-        echo $PID > logs/tts/instance_${instance_id}.pid
-        LOG_FILE="logs/tts/instance_${instance_id}_${port}.log"
-    fi
+    PID=$!
+    echo $PID > logs/tts/instance_${instance_id}.pid
+    LOG_FILE="logs/tts/instance_${instance_id}_${port}.log"
 
     echo -e "${GREEN}  → Started PID: $PID${NC}"
     echo -e "${BLUE}  → Watching logs (wait for model to load)...${NC}"
@@ -119,19 +104,8 @@ start_service() {
     return 0
 }
 
-# Start ASR instances
-echo -e "${BLUE}1. Starting ASR instances on GPU $GPU_ASR${NC}"
-echo ""
-
-for i in "${!ASR_PORTS[@]}"; do
-    PORT=${ASR_PORTS[$i]}
-    INSTANCE_ID=$((i + 1))
-    start_service "ASR" "$GPU_ASR" "$PORT" "$INSTANCE_ID"
-    sleep 2
-done
-
 # Start TTS instances
-echo -e "${BLUE}2. Starting TTS instances on GPU $GPU_TTS${NC}"
+echo -e "${BLUE}Starting TTS instances on GPU $GPU_TTS${NC}"
 echo ""
 
 for i in "${!TTS_PORTS[@]}"; do
@@ -147,16 +121,6 @@ echo -e "${BLUE}Startup Complete - Status Check${NC}"
 echo -e "${BLUE}=========================================${NC}"
 echo ""
 
-echo "ASR Health Checks:"
-for PORT in "${ASR_PORTS[@]}"; do
-    if curl -s -f "http://localhost:$PORT/health" > /dev/null 2>&1; then
-        echo -e "  ${GREEN}✓${NC} Port $PORT: Healthy"
-    else
-        echo -e "  ${YELLOW}⚠${NC} Port $PORT: Not ready yet"
-    fi
-done
-
-echo ""
 echo "TTS Health Checks:"
 for PORT in "${TTS_PORTS[@]}"; do
     if curl -s -f "http://localhost:$PORT/health" > /dev/null 2>&1; then
@@ -170,11 +134,11 @@ echo ""
 echo -e "${BLUE}=========================================${NC}"
 echo ""
 echo "Monitor all logs:"
-echo "  tail -f logs/asr/*.log logs/tts/*.log"
+echo "  tail -f logs/tts/*.log"
 echo ""
 echo "Check GPU usage:"
 echo "  nvidia-smi"
 echo ""
-echo "Stop cluster:"
+echo "Stop service:"
 echo "  bash scripts/stop_all.sh"
 echo ""

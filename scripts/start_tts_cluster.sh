@@ -1,11 +1,11 @@
 #!/bin/bash
-# Start multiple TTS service instances on GPU 1
+# Start multiple TTS service instances on GPU 0
 # Each instance runs on a different port for load balancing
 
 set -e
 
 # Configuration
-GPU_ID=1
+GPU_ID=0
 INSTANCES=2
 PORTS=(8002 8012)
 

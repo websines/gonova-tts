@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run all benchmarks and provide comprehensive report
+# Run TTS benchmark
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -12,10 +12,8 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo -e "${CYAN}=========================================${NC}"
-echo -e "${CYAN}Voice Agent System Benchmark${NC}"
+echo -e "${CYAN}TTS Service Benchmark${NC}"
 echo -e "${CYAN}=========================================${NC}"
-echo ""
-echo "Benchmarking both ASR and TTS services..."
 echo ""
 
 # Parse arguments
@@ -27,17 +25,13 @@ fi
 
 # Configure URLs
 if [ "$DIRECT_MODE" = true ]; then
-    # Test backend services directly (bypass nginx)
-    ASR_URL="${ASR_URL:-http://localhost:8001}"
+    # Test backend service directly (bypass nginx)
     TTS_URL="${TTS_URL:-http://localhost:8002}"
-    ASR_HOST="${ASR_HOST:-localhost}"
     TTS_HOST="${TTS_HOST:-localhost}"
-    echo -e "${YELLOW}Direct mode: Testing backend services${NC}"
+    echo -e "${YELLOW}Direct mode: Testing backend service${NC}"
 else
     # Test through nginx
-    ASR_URL="${ASR_URL:-http://localhost}"
     TTS_URL="${TTS_URL:-http://localhost}"
-    ASR_HOST="${ASR_HOST:-localhost}"
     TTS_HOST="${TTS_HOST:-localhost}"
 fi
 
@@ -45,39 +39,17 @@ ITERATIONS="${ITERATIONS:-5}"
 
 # Check if remote URL provided as argument
 if [ "$1" ]; then
-    ASR_URL="$1"
     TTS_URL="$1"
-    ASR_HOST="${2:-asr.gonova.one}"
     TTS_HOST="${2:-tts.gonova.one}"
 fi
 
 echo "Configuration:"
-echo "  ASR URL: $ASR_URL"
-echo "  ASR Host: $ASR_HOST"
 echo "  TTS URL: $TTS_URL"
 echo "  TTS Host: $TTS_HOST"
 echo "  Iterations: $ITERATIONS"
 echo ""
 
-# Run ASR benchmark
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}ASR Service Benchmark${NC}"
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-
-ASR_URL="$ASR_URL" ASR_HOST="$ASR_HOST" ITERATIONS="$ITERATIONS" \
-    "$SCRIPT_DIR/benchmark_asr.sh"
-ASR_RESULT=$?
-
-echo ""
-echo ""
-
 # Run TTS benchmark
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${BLUE}TTS Service Benchmark${NC}"
-echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-
 TTS_URL="$TTS_URL" TTS_HOST="$TTS_HOST" ITERATIONS="$ITERATIONS" \
     "$SCRIPT_DIR/benchmark_tts.sh"
 TTS_RESULT=$?
@@ -87,38 +59,28 @@ echo ""
 
 # Final summary
 echo -e "${CYAN}=========================================${NC}"
-echo -e "${CYAN}Overall System Performance${NC}"
+echo -e "${CYAN}TTS Service Performance${NC}"
 echo -e "${CYAN}=========================================${NC}"
 echo ""
 
-if [ $ASR_RESULT -eq 0 ]; then
-    echo -e "ASR Service: ${GREEN}✓ PASSED${NC}"
-else
-    echo -e "ASR Service: ${YELLOW}⚠ NEEDS ATTENTION${NC}"
-fi
-
 if [ $TTS_RESULT -eq 0 ]; then
     echo -e "TTS Service: ${GREEN}✓ PASSED${NC}"
-else
-    echo -e "TTS Service: ${YELLOW}⚠ NEEDS ATTENTION${NC}"
-fi
-
-echo ""
-
-if [ $ASR_RESULT -eq 0 ] && [ $TTS_RESULT -eq 0 ]; then
+    echo ""
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${GREEN}System is performing optimally! 🚀${NC}"
+    echo -e "${GREEN}Service is performing optimally! 🚀${NC}"
     echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     exit 0
 else
+    echo -e "TTS Service: ${YELLOW}⚠ NEEDS ATTENTION${NC}"
+    echo ""
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-    echo -e "${YELLOW}Some services need attention ⚠${NC}"
+    echo -e "${YELLOW}Service needs attention ⚠${NC}"
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     echo "Troubleshooting:"
     echo "  - Check GPU usage: nvidia-smi"
-    echo "  - Check service logs: tail -f logs/{asr,tts}/*.log"
-    echo "  - Restart services: ./scripts/stop_all.sh && ./scripts/start_with_logs.sh"
+    echo "  - Check service logs: tail -f logs/tts/*.log"
+    echo "  - Restart service: ./scripts/stop_all.sh && ./scripts/start_all.sh"
     echo "  - Check network: ping <your-server>"
     exit 1
 fi

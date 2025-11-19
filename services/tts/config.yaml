@@ -5,7 +5,7 @@ model:
   # Path to Chatterbox model (install from GitHub)
   model_path: null  # Will use default if not specified
   device: "cuda"
-  device_index: 1    # GPU 1 (second 3090)
+  device_index: 0    # GPU 0 (configured via CUDA_VISIBLE_DEVICES in startup script)
   chunk_size: 50     # Tokens per audio chunk (25-100)
   sample_rate: 24000
 

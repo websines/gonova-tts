@@ -1,7 +1,7 @@
 [project]
-name = "voice-agent"
+name = "gonova-tts"
 version = "0.1.0"
-description = "Modular voice agent with separate ASR and TTS microservices"
+description = "Production-ready TTS microservice with voice cloning"
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
@@ -13,14 +13,7 @@ dependencies = [
     "websockets>=12.0",
     "python-multipart>=0.0.9",
 
-    # ASR dependencies
-    "faster-whisper>=1.0.0",
-    "onnxruntime>=1.16.0",
-    "soundfile>=0.12.0",
-    "librosa>=0.10.0",
-
-    # TTS dependencies (will need manual install from GitHub)
-    # chatterbox-streaming - install separately
+    # TTS dependencies (chatterbox-streaming - install separately from GitHub)
     "tokenizers>=0.20,<0.21",  # Pin for chatterbox compatibility
 
     # PyTorch (CUDA version recommended)
@@ -30,7 +23,7 @@ dependencies = [
     # Audio processing
     "numpy>=1.24.0",
     "scipy>=1.11.0",
-    "pydub>=0.25.0",
+    "soundfile>=0.12.0",
 
     # Utilities
     "pydantic>=2.5.0",

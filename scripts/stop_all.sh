@@ -1,12 +1,12 @@
 #!/bin/bash
-# Stop entire voice agent cluster
+# Stop TTS service cluster
 
 set -e
 
 cd "$(dirname "$0")/.."
 
 echo "========================================="
-echo "Stopping Voice Agent Cluster"
+echo "Stopping TTS Service Cluster"
 echo "========================================="
 echo ""
 
@@ -22,11 +22,6 @@ echo "2. Stopping TTS cluster..."
 bash scripts/stop_tts_cluster.sh
 echo ""
 
-# Stop ASR cluster
-echo "3. Stopping ASR cluster..."
-bash scripts/stop_asr_cluster.sh
-echo ""
-
 echo "========================================="
-echo "Cluster Stopped"
+echo "TTS Cluster Stopped"
 echo "========================================="
