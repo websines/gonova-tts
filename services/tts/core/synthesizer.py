@@ -20,21 +20,51 @@ import asyncio
 logger = logging.getLogger(__name__)
 
 
-def split_into_sentences(text: str) -> List[str]:
+def split_into_sentences(text: str, max_chars: int = 100) -> List[str]:
     """
     Split text into sentences for streaming.
 
     Uses regex to split on sentence-ending punctuation while preserving
-    the punctuation marks.
+    the punctuation marks. Also splits long sentences on commas.
+
+    Args:
+        text: Text to split
+        max_chars: Maximum characters per chunk (splits on comma if exceeded)
     """
-    # Split on .!? followed by space or end of string
-    # Keep the punctuation with the sentence
+    # First split on .!? followed by space or end of string
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
 
     # Filter out empty strings and strip whitespace
     sentences = [s.strip() for s in sentences if s.strip()]
 
-    return sentences
+    # Further split long sentences on commas
+    result = []
+    for sentence in sentences:
+        if len(sentence) <= max_chars:
+            result.append(sentence)
+        else:
+            # Split on comma followed by space
+            parts = re.split(r',\s+', sentence)
+            current = ""
+            for part in parts:
+                if not current:
+                    current = part
+                elif len(current) + len(part) + 2 <= max_chars:
+                    current += ", " + part
+                else:
+                    # Add comma back if not ending with punctuation
+                    if current and not current[-1] in '.!?':
+                        current += ","
+                    result.append(current)
+                    current = part
+
+            if current:
+                # Ensure last part has proper ending
+                if not current[-1] in '.!?,':
+                    current += "."
+                result.append(current)
+
+    return result
 
 
 class StreamingSynthesizer:
