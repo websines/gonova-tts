@@ -203,7 +203,8 @@ class StreamingSynthesizer:
                     audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
                     chunk_size=chunk_size,
                     exaggeration=exaggeration,
-                    cfg_weight=3.0,
+                    temperature=0.8,
+                    cfg_weight=0.5,
                 ):
                     # Convert to numpy if needed
                     if isinstance(audio_chunk, torch.Tensor):
