@@ -2,30 +2,47 @@
 TTS synthesizer using Chatterbox-streaming.
 
 Handles:
-- Streaming speech synthesis
+- Sentence-by-sentence streaming (low latency)
 - Voice cloning from reference audio
-- Low-latency chunked generation
 - GPU-accelerated inference
 """
 
 import logging
+import re
 import time
 import torch
 import torchaudio
 import numpy as np
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, List
 from pathlib import Path
 import asyncio
 
 logger = logging.getLogger(__name__)
 
 
+def split_into_sentences(text: str) -> List[str]:
+    """
+    Split text into sentences for streaming.
+
+    Uses regex to split on sentence-ending punctuation while preserving
+    the punctuation marks.
+    """
+    # Split on .!? followed by space or end of string
+    # Keep the punctuation with the sentence
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+
+    # Filter out empty strings and strip whitespace
+    sentences = [s.strip() for s in sentences if s.strip()]
+
+    return sentences
+
+
 class StreamingSynthesizer:
     """
     Chatterbox-streaming TTS with voice cloning.
 
+    Uses sentence-by-sentence generation for low latency streaming.
     Pre-loads model at startup to avoid cold start latency.
-    Supports streaming audio generation chunk-by-chunk.
 
     NOTE: Chatterbox must be installed separately from GitHub:
     git clone https://github.com/davidbrowne17/chatterbox-streaming
@@ -37,7 +54,7 @@ class StreamingSynthesizer:
         model_path: Optional[str] = None,
         device: str = "cuda",
         device_index: int = 1,  # GPU 1 for TTS
-        chunk_size: int = 50,
+        chunk_size: int = 15,  # Smaller chunks for lower latency
         sample_rate: int = 24000,
     ):
         """
@@ -91,14 +108,23 @@ class StreamingSynthesizer:
                     "Install from: https://github.com/davidbrowne17/chatterbox-streaming"
                 )
 
+            # Enable CUDA optimizations
+            try:
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
+                logger.info("CUDA optimizations enabled")
+            except AttributeError:
+                pass
+
             # Load model using from_pretrained
             self.model = ChatterboxTTS.from_pretrained(device=self.device)
 
-            # Warm up GPU with dummy synthesis
+            # Warm up GPU with dummy synthesis (multiple times for better warmup)
             logger.info("Warming up GPU...")
-            dummy_text = "Hello, this is a test."
             loop = asyncio.get_event_loop()
-            _ = await loop.run_in_executor(None, self._synthesize_sync, dummy_text)
+            for _ in range(2):
+                _ = await loop.run_in_executor(None, self._synthesize_sync, "Hello warmup.")
 
             load_time = time.time() - start_time
             logger.info(f"Model loaded in {load_time:.2f}s")
@@ -117,12 +143,14 @@ class StreamingSynthesizer:
         text: str,
         voice_embedding: Optional[torch.Tensor] = None,
         chunk_size: Optional[int] = None,
-        exaggeration: float = 0.5,
+        exaggeration: float = 0.25,
     ) -> AsyncGenerator[np.ndarray, None]:
         """
-        Synthesize text to speech with streaming.
+        Synthesize text to speech with sentence-by-sentence streaming.
 
-        Yields audio chunks as they're generated (low latency).
+        Splits text into sentences and generates each sentence separately,
+        yielding audio as soon as each sentence is complete. This provides
+        much lower perceived latency than waiting for the full text.
 
         Args:
             text: Text to synthesize
@@ -144,33 +172,40 @@ class StreamingSynthesizer:
         first_chunk_time = None
 
         try:
-            # Run synthesis in executor (blocking call)
-            loop = asyncio.get_event_loop()
+            # Split text into sentences
+            sentences = split_into_sentences(text)
+            logger.info(f"Split text into {len(sentences)} sentences")
 
-            # Generate chunks
-            chunk_id = 0
-            async for audio_chunk in self._stream_generate(
-                text,
-                voice_embedding,
-                chunk_size,
-                exaggeration
-            ):
-                # Track first chunk latency
-                if chunk_id == 0:
-                    first_chunk_time = time.time() - start_time
-                    self.stats['first_chunk_latency'] += first_chunk_time
-                    logger.debug(f"First chunk in {first_chunk_time*1000:.0f}ms")
+            sentence_idx = 0
+            for sentence in sentences:
+                if not sentence.strip():
+                    continue
 
-                yield audio_chunk
-                chunk_id += 1
+                logger.debug(f"Generating sentence {sentence_idx + 1}/{len(sentences)}: '{sentence[:50]}...'")
+
+                # Generate audio for this sentence
+                async for audio_chunk in self._generate_sentence(
+                    sentence,
+                    voice_embedding,
+                    chunk_size,
+                    exaggeration
+                ):
+                    # Track first chunk latency
+                    if first_chunk_time is None:
+                        first_chunk_time = time.time() - start_time
+                        self.stats['first_chunk_latency'] += first_chunk_time
+                        logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
+
+                    yield audio_chunk
+
+                sentence_idx += 1
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += 1
             self.stats['total_latency'] += total_time
 
-            logger.debug(
-                f"Synthesized '{text[:30]}...' in {total_time*1000:.0f}ms "
-                f"({chunk_id} chunks)"
+            logger.info(
+                f"Synthesized {len(sentences)} sentences in {total_time*1000:.0f}ms"
             )
 
         except Exception as e:
@@ -178,98 +213,67 @@ class StreamingSynthesizer:
             logger.error(f"Synthesis error: {e}")
             raise
 
-    async def _stream_generate(
+    async def _generate_sentence(
         self,
-        text: str,
+        sentence: str,
         voice_embedding: Optional[torch.Tensor],
         chunk_size: int,
         exaggeration: float
     ) -> AsyncGenerator[np.ndarray, None]:
         """
-        Stream-generate audio chunks.
+        Generate audio for a single sentence using non-streaming for better RTF.
 
-        Runs the synchronous Chatterbox generator in a thread pool
-        and yields chunks via an async queue to avoid blocking the event loop.
+        Non-streaming has ~1.8x RTF vs ~3-5x RTF for streaming on 3090.
         """
         loop = asyncio.get_event_loop()
-        queue = asyncio.Queue()
-        error_holder = [None]  # Hold any exception from the thread
-
-        def run_sync_generator():
-            """Run blocking generator in thread, push chunks to async queue."""
-            try:
-                for audio_chunk, metrics in self.model.generate_stream(
-                    text,
-                    audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
-                    chunk_size=chunk_size,
-                    exaggeration=exaggeration,
-                    temperature=0.8,
-                    cfg_weight=0.5,
-                ):
-                    # Convert to numpy if needed
-                    if isinstance(audio_chunk, torch.Tensor):
-                        audio_chunk = audio_chunk.cpu().numpy()
-
-                    # Push chunk to async queue (thread-safe)
-                    asyncio.run_coroutine_threadsafe(queue.put(audio_chunk), loop)
-
-                # Signal completion
-                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
-
-            except Exception as e:
-                error_holder[0] = e
-                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
 
         try:
-            # Start generator in thread pool
-            loop.run_in_executor(None, run_sync_generator)
-
-            # Yield chunks as they arrive from the queue
-            while True:
-                chunk = await queue.get()
-
-                if chunk is None:
-                    # Check if there was an error
-                    if error_holder[0] is not None:
-                        raise error_holder[0]
-                    break
-
-                yield chunk
-
-        except Exception as e:
-            # Fallback: Non-streaming synthesis
-            logger.warning(f"Streaming failed ({e}), using full synthesis")
+            # Use non-streaming generation (faster RTF)
             audio = await loop.run_in_executor(
                 None,
                 self._synthesize_sync,
-                text,
+                sentence,
                 voice_embedding,
                 exaggeration
             )
 
-            # Chunk the output manually
-            chunk_samples = int(self.sample_rate * 0.5)  # 0.5s chunks
-            for i in range(0, len(audio), chunk_samples):
-                yield audio[i:i + chunk_samples]
+            # Yield the entire sentence audio as one chunk
+            # This gives better quality than chunking mid-sentence
+            yield audio
+
+        except Exception as e:
+            logger.error(f"Sentence generation failed: {e}")
+            raise
 
     def _synthesize_sync(
         self,
         text: str,
         voice_embedding: Optional[torch.Tensor] = None,
-        exaggeration: float = 0.5
+        exaggeration: float = 0.25
     ) -> np.ndarray:
         """
-        Synchronous full synthesis (fallback).
+        Synchronous synthesis for a single sentence.
+
+        Uses optimized settings from local-chatterbox-tts:
+        - cfg_weight: 1.1 (balanced quality/speed)
+        - temperature: 1.0
+        - exaggeration: 0.25 (more natural)
         """
-        # Use Chatterbox generate method
+        # Use Chatterbox generate method with optimized settings
         audio = self.model.generate(
             text,
             audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
             exaggeration=exaggeration,
+            cfg_weight=1.1,
+            temperature=1.0,
         )
 
         if isinstance(audio, torch.Tensor):
-            audio = audio.cpu().numpy()
+            audio = audio.squeeze().cpu().numpy()
+
+        # Ensure float32
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
 
         return audio
 
