@@ -188,27 +188,52 @@ class StreamingSynthesizer:
         """
         Stream-generate audio chunks.
 
-        NOTE: This is a placeholder. Actual Chatterbox API may differ.
-        Check the library documentation for exact usage.
+        Runs the synchronous Chatterbox generator in a thread pool
+        and yields chunks via an async queue to avoid blocking the event loop.
         """
-        # Run in executor to avoid blocking
         loop = asyncio.get_event_loop()
+        queue = asyncio.Queue()
+        error_holder = [None]  # Hold any exception from the thread
 
-        # Use Chatterbox streaming API
+        def run_sync_generator():
+            """Run blocking generator in thread, push chunks to async queue."""
+            try:
+                for audio_chunk, metrics in self.model.generate_stream(
+                    text,
+                    audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
+                    chunk_size=chunk_size,
+                    exaggeration=exaggeration,
+                    cfg_weight=3.0,
+                ):
+                    # Convert to numpy if needed
+                    if isinstance(audio_chunk, torch.Tensor):
+                        audio_chunk = audio_chunk.cpu().numpy()
+
+                    # Push chunk to async queue (thread-safe)
+                    asyncio.run_coroutine_threadsafe(queue.put(audio_chunk), loop)
+
+                # Signal completion
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
+            except Exception as e:
+                error_holder[0] = e
+                asyncio.run_coroutine_threadsafe(queue.put(None), loop)
+
         try:
-            # Chatterbox uses generate_stream which yields (audio_chunk, metrics)
-            for audio_chunk, metrics in self.model.generate_stream(
-                text,
-                audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
-                chunk_size=chunk_size,
-                exaggeration=exaggeration,
-                cfg_weight=3.0,
-            ):
-                # audio_chunk is already a torch.Tensor
-                if isinstance(audio_chunk, torch.Tensor):
-                    audio_chunk = audio_chunk.cpu().numpy()
+            # Start generator in thread pool
+            loop.run_in_executor(None, run_sync_generator)
 
-                yield audio_chunk
+            # Yield chunks as they arrive from the queue
+            while True:
+                chunk = await queue.get()
+
+                if chunk is None:
+                    # Check if there was an error
+                    if error_holder[0] is not None:
+                        raise error_holder[0]
+                    break
+
+                yield chunk
 
         except Exception as e:
             # Fallback: Non-streaming synthesis
