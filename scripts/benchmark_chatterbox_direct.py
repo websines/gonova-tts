@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
 Direct Chatterbox benchmark - bypasses our server to test raw performance
+
+Run from project root:
+  CUDA_VISIBLE_DEVICES=1 python scripts/benchmark_chatterbox_direct.py
 """
-import torch
+import sys
 import time
+
+# Check for torch shadowing
+import torch
+if not hasattr(torch, '__version__'):
+    print(f"ERROR: 'torch' module is being shadowed!")
+    print(f"torch.__file__ = {torch.__file__}")
+    print("There might be a local file named 'torch.py' - please rename/delete it")
+    sys.exit(1)
 
 print(f"PyTorch version: {torch.__version__}")
 
@@ -14,7 +25,8 @@ try:
     torch.backends.cudnn.allow_tf32 = True
     print("CUDA optimizations enabled")
 except AttributeError:
-    print("CUDA optimizations not available (older PyTorch)")
+    print("CUDA optimizations not available")
+
 print(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
