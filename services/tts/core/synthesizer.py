@@ -191,10 +191,16 @@ class StreamingSynthesizer:
 
             # Warmup with a simple generation
             logger.info("Warming up vLLM engine...")
-            warmup_text = "Hello, this is a warmup test."
+            warmup_texts = ["Hello, this is a warmup test."]
             _ = await loop.run_in_executor(
                 _executor,
-                lambda: self.model.generate([warmup_text], exaggeration=0.5)
+                lambda: self.model.generate(
+                    warmup_texts,
+                    exaggeration=0.5,
+                    temperature=0.8,
+                    top_p=0.8,
+                    repetition_penalty=2.0,
+                )
             )
 
             self._warmup_done = True
@@ -384,14 +390,18 @@ class StreamingSynthesizer:
             List of numpy audio arrays
         """
         # Use chatterbox-vllm generate method (supports batching natively)
+        # Parameters match the original Chatterbox defaults for quality
         audio_tensors = self.model.generate(
             texts,
             audio_prompt_path=voice_embedding,
             exaggeration=exaggeration,
             temperature=0.8,
+            top_p=0.8,
+            repetition_penalty=2.0,
         )
 
         # Convert tensors to numpy arrays
+        # generate() returns list[torch.Tensor], one per input text
         result = []
         for audio in audio_tensors:
             if isinstance(audio, torch.Tensor):
