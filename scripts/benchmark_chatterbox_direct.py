@@ -5,12 +5,16 @@ Direct Chatterbox benchmark - bypasses our server to test raw performance
 import torch
 import time
 
-# Enable optimizations
-torch.backends.cudnn.benchmark = True
-torch.backends.cuda.matmul.allow_tf32 = True
-torch.backends.cudnn.allow_tf32 = True
-
 print(f"PyTorch version: {torch.__version__}")
+
+# Enable optimizations if available
+try:
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    print("CUDA optimizations enabled")
+except AttributeError:
+    print("CUDA optimizations not available (older PyTorch)")
 print(f"CUDA available: {torch.cuda.is_available()}")
 if torch.cuda.is_available():
     print(f"CUDA device: {torch.cuda.get_device_name(0)}")
