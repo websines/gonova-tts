@@ -47,6 +47,8 @@ logger = structlog.get_logger()
 class TTSService:
     """
     Main TTS service with all components integrated.
+
+    Uses Chatterbox-vLLM for high-performance inference (4-10x faster).
     """
 
     def __init__(
@@ -56,19 +58,25 @@ class TTSService:
         device_index: int = 0,  # Use device 0 (controlled by CUDA_VISIBLE_DEVICES)
         chunk_size: int = 50,
         max_connections: int = 50,
+        max_batch_size: int = 8,  # vLLM batch size for throughput
+        max_model_len: int = 1000,  # Max tokens per generation
     ):
         self.model_path = model_path
         self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
         self.max_connections = max_connections
+        self.max_batch_size = max_batch_size
+        self.max_model_len = max_model_len
 
-        # Components
+        # Components - using vLLM-accelerated synthesizer
         self.synthesizer = StreamingSynthesizer(
             model_path=model_path,
             device=device,
             device_index=device_index,
             chunk_size=chunk_size,
+            max_batch_size=max_batch_size,
+            max_model_len=max_model_len,
         )
 
         self.voice_manager = VoiceManager(
@@ -371,17 +379,32 @@ async def startup():
     """Initialize service on startup"""
     global service
 
+    import os
+
     # When CUDA_VISIBLE_DEVICES is set, always use device 0
     # (the startup script controls which physical GPU is visible)
-    import os
     device_index = 0
 
+    # vLLM configuration from environment
+    max_batch_size = int(os.getenv("TTS_MAX_BATCH_SIZE", "8"))
+    max_model_len = int(os.getenv("TTS_MAX_MODEL_LEN", "1000"))
+    max_connections = int(os.getenv("TTS_MAX_CONNECTIONS", "50"))
+
+    logger.info(
+        "initializing_tts_service",
+        max_batch_size=max_batch_size,
+        max_model_len=max_model_len,
+        max_connections=max_connections,
+    )
+
     service = TTSService(
-        model_path=None,  # Set path to Chatterbox model if needed
+        model_path=None,  # Uses HuggingFace pretrained model
         device="cuda",
         device_index=device_index,
         chunk_size=50,
-        max_connections=50,
+        max_connections=max_connections,
+        max_batch_size=max_batch_size,
+        max_model_len=max_model_len,
     )
 
     await service.start()

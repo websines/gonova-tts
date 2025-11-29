@@ -1,9 +1,9 @@
 [project]
 name = "gonova-tts"
-version = "0.1.0"
-description = "Production-ready TTS microservice with voice cloning"
+version = "0.2.0"
+description = "Production-ready TTS microservice with voice cloning (vLLM-accelerated)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 
 dependencies = [
@@ -13,8 +13,22 @@ dependencies = [
     "websockets>=12.0",
     "python-multipart>=0.0.9",
 
-    # TTS dependencies (chatterbox-streaming - install separately from GitHub)
-    "tokenizers>=0.20,<0.21",  # Pin for chatterbox compatibility
+    # TTS - Chatterbox-vLLM (high-performance vLLM-based inference)
+    # Install: pip install chatterbox-vllm
+    # Requires: Linux/WSL2 with NVIDIA GPU
+    "chatterbox-vllm",
+
+    # vLLM dependencies (pinned for compatibility)
+    "vllm==0.10.0",
+    "transformers",
+    "tokenizers",
+    "librosa",
+    "s3tokenizer",
+    "omegaconf",
+    "conformer",
+    "diffusers",
+    "peft",
+    "llvmlite>=0.44.0",
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",

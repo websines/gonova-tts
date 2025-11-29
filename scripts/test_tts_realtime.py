@@ -55,9 +55,9 @@ async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool
         request = {
             "type": "synthesize",
             "text": text,
-            "voice_id": "default",
+            "voice_id": "urek",
             "chunk_size": chunk_size,
-            "exaggeration": 0.5,
+            "exaggeration": 0.3,
             "streaming": True
         }
 

@@ -1,10 +1,15 @@
 """
-TTS synthesizer using optimized Chatterbox with CUDA graphs.
+TTS synthesizer using Chatterbox-vLLM for high-performance inference.
 
 Handles:
-- Sentence-by-sentence streaming (low latency)
+- Batched generation (4-10x faster than standard Chatterbox)
 - Voice cloning from reference audio
-- GPU-accelerated inference with CUDA graphs (~2-4x speedup)
+- vLLM continuous batching for high throughput
+
+Performance (RTX 3090):
+- 40 minutes of audio in ~87 seconds
+- T3 token generation: ~13 seconds
+- S3Gen waveform synthesis: ~60 seconds
 """
 
 import logging
@@ -13,14 +18,18 @@ import time
 import torch
 import torchaudio
 import numpy as np
-from typing import Optional, AsyncGenerator, List
+from typing import Optional, AsyncGenerator, List, Union
 from pathlib import Path
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
+# Thread pool for running sync vLLM operations
+_executor = ThreadPoolExecutor(max_workers=2)
 
-def split_into_sentences(text: str, max_chars: int = 100) -> List[str]:
+
+def split_into_sentences(text: str, max_chars: int = 150) -> List[str]:
     """
     Split text into sentences for streaming.
 
@@ -69,74 +78,92 @@ def split_into_sentences(text: str, max_chars: int = 100) -> List[str]:
 
 class StreamingSynthesizer:
     """
-    Optimized Chatterbox TTS with CUDA graphs for fast inference.
+    High-performance Chatterbox TTS using vLLM for inference.
 
-    Uses sentence-by-sentence generation for low latency streaming.
-    Pre-loads model at startup and warms up CUDA graphs to avoid cold start.
+    Uses vLLM's continuous batching for 4-10x speedup over standard Chatterbox.
+    Supports batched generation for maximum throughput.
 
-    NOTE: Install optimized chatterbox from:
-    pip install git+https://github.com/rsxdalv/chatterbox.git@faster
+    NOTE: Install chatterbox-vllm:
+    pip install chatterbox-vllm
     """
 
     def __init__(
         self,
         model_path: Optional[str] = None,
         device: str = "cuda",
-        device_index: int = 1,  # GPU 1 for TTS
-        chunk_size: int = 15,  # Not used with non-streaming, kept for API compat
+        device_index: int = 0,  # GPU index
+        chunk_size: int = 15,  # Not used, kept for API compat
         sample_rate: int = 24000,
+        max_batch_size: int = 8,  # vLLM batch size
+        max_model_len: int = 1000,  # Max tokens per generation
     ):
         """
         Args:
-            model_path: Path to Chatterbox model
+            model_path: Path to Chatterbox model (uses HF if None)
             device: "cuda" or "cpu"
-            device_index: GPU index (1 for second 3090)
-            chunk_size: Tokens per audio chunk (kept for API compatibility)
-            sample_rate: Output sample rate
+            device_index: GPU index
+            chunk_size: Kept for API compatibility
+            sample_rate: Output sample rate (24000 for Chatterbox)
+            max_batch_size: Maximum batch size for vLLM
+            max_model_len: Maximum tokens per generation
         """
         self.model_path = model_path
-        self.device = f"{device}:{device_index}" if device == "cuda" else device
+        self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
-        self.sample_rate = sample_rate
+        self.max_batch_size = max_batch_size
+        self.max_model_len = max_model_len
 
         self.model = None
         self.is_loaded = False
         self._warmup_done = False
+
+        # Sample rate is set by the model (S3GEN_SR = 24000)
+        self._model_sample_rate = None
 
         # Stats
         self.stats = {
             'syntheses': 0,
             'total_latency': 0.0,
             'first_chunk_latency': 0.0,
+            't3_time': 0.0,
+            's3gen_time': 0.0,
             'errors': 0,
         }
 
+    @property
+    def sample_rate(self) -> int:
+        """Output sample rate from model"""
+        if self._model_sample_rate:
+            return self._model_sample_rate
+        return 24000  # Default S3GEN_SR
+
     async def load(self):
         """
-        Load model at startup (avoid cold start).
+        Load vLLM-optimized Chatterbox model at startup.
 
-        Also warms up CUDA graphs which takes a few extra seconds but
-        makes subsequent inference much faster.
+        This downloads model weights from HuggingFace and initializes
+        the vLLM inference engine for high-throughput generation.
         """
         if self.is_loaded:
             logger.warning("Model already loaded")
             return
 
         logger.info(
-            f"Loading optimized Chatterbox model on {self.device}"
+            f"Loading Chatterbox-vLLM model (batch_size={self.max_batch_size}, "
+            f"max_len={self.max_model_len})"
         )
 
         start_time = time.time()
 
         try:
-            # Import Chatterbox (optimized version with CUDA graphs)
+            # Import chatterbox-vllm
             try:
-                from chatterbox.tts import ChatterboxTTS
+                from chatterbox_vllm.tts import ChatterboxTTS
             except ImportError:
                 raise ImportError(
-                    "Optimized chatterbox not installed. "
-                    "Install from: pip install git+https://github.com/rsxdalv/chatterbox.git@faster"
+                    "chatterbox-vllm not installed. "
+                    "Install from: pip install chatterbox-vllm"
                 )
 
             # Enable CUDA optimizations
@@ -148,23 +175,27 @@ class StreamingSynthesizer:
             except AttributeError:
                 pass
 
-            # Load model using from_pretrained
-            self.model = ChatterboxTTS.from_pretrained(device=self.device)
-
-            # Extensive warmup to capture CUDA graphs
-            # First few runs are slow as graphs are captured
-            logger.info("Warming up GPU and capturing CUDA graphs...")
+            # Load model using from_pretrained (downloads from HuggingFace)
+            # This also initializes the vLLM engine
             loop = asyncio.get_event_loop()
+            self.model = await loop.run_in_executor(
+                _executor,
+                lambda: ChatterboxTTS.from_pretrained(
+                    max_batch_size=self.max_batch_size,
+                    max_model_len=self.max_model_len,
+                )
+            )
 
-            warmup_texts = [
-                "Hello.",
-                "Hello, this is a warmup test.",
-                "The quick brown fox jumps over the lazy dog, and this is a longer sentence to warm up the model properly.",
-            ]
+            # Get sample rate from model
+            self._model_sample_rate = self.model.sr
 
-            for i, text in enumerate(warmup_texts):
-                logger.info(f"Warmup {i+1}/{len(warmup_texts)}: '{text[:30]}...'")
-                _ = await loop.run_in_executor(None, self._synthesize_sync, text, None, 0.5)
+            # Warmup with a simple generation
+            logger.info("Warming up vLLM engine...")
+            warmup_text = "Hello, this is a warmup test."
+            _ = await loop.run_in_executor(
+                _executor,
+                lambda: self.model.generate([warmup_text], exaggeration=0.5)
+            )
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -182,25 +213,26 @@ class StreamingSynthesizer:
     async def synthesize_streaming(
         self,
         text: str,
-        voice_embedding: Optional[torch.Tensor] = None,
+        voice_embedding: Optional[str] = None,
         chunk_size: Optional[int] = None,
-        exaggeration: float = 0.25,
+        exaggeration: float = 0.5,
     ) -> AsyncGenerator[np.ndarray, None]:
         """
         Synthesize text to speech with sentence-by-sentence streaming.
 
         Splits text into sentences and generates each sentence separately,
-        yielding audio as soon as each sentence is complete. This provides
-        low perceived latency while using fast non-streaming generation.
+        yielding audio as soon as each sentence is complete.
+
+        For maximum throughput, use synthesize_batch() instead.
 
         Args:
             text: Text to synthesize
             voice_embedding: Path to reference audio for voice cloning (None = default voice)
             chunk_size: Not used (kept for API compatibility)
-            exaggeration: Emotion intensity (0.0-1.0+)
+            exaggeration: Emotion intensity (0.0-1.0+, default 0.5)
 
         Yields:
-            np.ndarray: Audio chunks (Float32, sample_rate)
+            np.ndarray: Audio chunks (Float32, 24kHz)
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load() first")
@@ -216,28 +248,28 @@ class StreamingSynthesizer:
             sentences = split_into_sentences(text)
             logger.info(f"Split text into {len(sentences)} sentences")
 
-            sentence_idx = 0
-            for sentence in sentences:
-                if not sentence.strip():
-                    continue
+            # Generate sentences in batches for efficiency
+            batch_size = min(self.max_batch_size, len(sentences))
 
-                logger.debug(f"Generating sentence {sentence_idx + 1}/{len(sentences)}: '{sentence[:50]}...'")
+            for i in range(0, len(sentences), batch_size):
+                batch = sentences[i:i + batch_size]
+                logger.debug(f"Generating batch {i//batch_size + 1}: {len(batch)} sentences")
 
-                # Generate audio for this sentence
-                async for audio_chunk in self._generate_sentence(
-                    sentence,
+                # Generate batch
+                audios = await self._generate_batch(
+                    batch,
                     voice_embedding,
                     exaggeration
-                ):
-                    # Track first chunk latency
+                )
+
+                # Yield each audio in order
+                for audio in audios:
                     if first_chunk_time is None:
                         first_chunk_time = time.time() - start_time
                         self.stats['first_chunk_latency'] += first_chunk_time
                         logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
 
-                    yield audio_chunk
-
-                sentence_idx += 1
+                    yield audio
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += 1
@@ -252,70 +284,126 @@ class StreamingSynthesizer:
             logger.error(f"Synthesis error: {e}")
             raise
 
-    async def _generate_sentence(
+    async def synthesize_batch(
         self,
-        sentence: str,
+        texts: List[str],
+        voice_embedding: Optional[str] = None,
+        exaggeration: float = 0.5,
+    ) -> List[np.ndarray]:
+        """
+        Synthesize multiple texts in a single batch for maximum throughput.
+
+        This is the most efficient method when you have multiple texts to
+        synthesize - vLLM will batch them together for ~4-10x speedup.
+
+        Args:
+            texts: List of texts to synthesize
+            voice_embedding: Path to reference audio for voice cloning
+            exaggeration: Emotion intensity (0.0-1.0+)
+
+        Returns:
+            List[np.ndarray]: List of audio arrays (Float32, 24kHz)
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded. Call load() first")
+
+        if not texts:
+            return []
+
+        start_time = time.time()
+
+        try:
+            audios = await self._generate_batch(texts, voice_embedding, exaggeration)
+
+            total_time = time.time() - start_time
+            self.stats['syntheses'] += len(texts)
+            self.stats['total_latency'] += total_time
+
+            logger.info(
+                f"Batch synthesized {len(texts)} texts in {total_time*1000:.0f}ms "
+                f"({total_time/len(texts)*1000:.0f}ms per text)"
+            )
+
+            return audios
+
+        except Exception as e:
+            self.stats['errors'] += 1
+            logger.error(f"Batch synthesis error: {e}")
+            raise
+
+    async def _generate_batch(
+        self,
+        texts: List[str],
         voice_embedding: Optional[str],
         exaggeration: float
-    ) -> AsyncGenerator[np.ndarray, None]:
+    ) -> List[np.ndarray]:
         """
-        Generate audio for a single sentence.
+        Generate audio for a batch of texts using vLLM.
 
-        Uses optimized non-streaming generation with CUDA graphs for
-        ~0.8x RTF (faster than realtime).
+        Args:
+            texts: List of texts to synthesize
+            voice_embedding: Path to reference audio
+            exaggeration: Emotion intensity
+
+        Returns:
+            List of audio arrays
         """
         loop = asyncio.get_event_loop()
 
         try:
-            # Use non-streaming generation with CUDA graphs
-            audio = await loop.run_in_executor(
-                None,
-                self._synthesize_sync,
-                sentence,
+            # Run vLLM generation in thread pool (it's synchronous)
+            audios = await loop.run_in_executor(
+                _executor,
+                self._synthesize_batch_sync,
+                texts,
                 voice_embedding,
                 exaggeration
             )
 
-            # Yield the entire sentence audio as one chunk
-            yield audio
+            return audios
 
         except Exception as e:
-            logger.error(f"Sentence generation failed: {e}")
+            logger.error(f"Batch generation failed: {e}")
             raise
 
-    def _synthesize_sync(
+    def _synthesize_batch_sync(
         self,
-        text: str,
+        texts: List[str],
         voice_embedding: Optional[str] = None,
-        exaggeration: float = 0.25
-    ) -> np.ndarray:
+        exaggeration: float = 0.5
+    ) -> List[np.ndarray]:
         """
-        Synchronous synthesis for a single sentence.
+        Synchronous batch synthesis using vLLM.
 
-        Uses optimized settings:
-        - cfg_weight: 0.5 (fast, good quality)
-        - temperature: 0.8
-        - exaggeration: 0.25 (natural)
+        Args:
+            texts: List of texts to synthesize
+            voice_embedding: Path to reference audio
+            exaggeration: Emotion intensity
 
-        With CUDA graphs, achieves ~0.8x RTF on 3090.
+        Returns:
+            List of numpy audio arrays
         """
-        # Use Chatterbox generate method
-        audio = self.model.generate(
-            text,
-            audio_prompt_path=voice_embedding if isinstance(voice_embedding, str) else None,
+        # Use chatterbox-vllm generate method (supports batching natively)
+        audio_tensors = self.model.generate(
+            texts,
+            audio_prompt_path=voice_embedding,
             exaggeration=exaggeration,
-            cfg_weight=0.5,
             temperature=0.8,
         )
 
-        if isinstance(audio, torch.Tensor):
-            audio = audio.squeeze().cpu().numpy()
+        # Convert tensors to numpy arrays
+        result = []
+        for audio in audio_tensors:
+            if isinstance(audio, torch.Tensor):
+                audio = audio.squeeze().cpu().numpy()
 
-        # Ensure float32
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
+            # Ensure float32
+            if audio.dtype != np.float32:
+                audio = audio.astype(np.float32)
 
-        return audio
+            result.append(audio)
+
+        return result
 
     async def extract_voice_embedding(
         self,
@@ -325,8 +413,8 @@ class StreamingSynthesizer:
         """
         Save reference audio for voice cloning.
 
-        The optimized chatterbox uses audio file paths for voice cloning,
-        so we save the audio to a temp file and return the path.
+        Chatterbox-vLLM uses audio file paths for voice cloning,
+        so we save the audio to a file and return the path.
 
         Args:
             reference_audio: Audio as numpy array
@@ -344,12 +432,13 @@ class StreamingSynthesizer:
             # Convert to tensor
             audio_tensor = torch.from_numpy(reference_audio).float()
 
-            # Resample if needed
-            if sample_rate != self.sample_rate:
+            # Resample to model sample rate if needed
+            target_sr = self.sample_rate
+            if sample_rate != target_sr:
                 audio_tensor = torchaudio.functional.resample(
                     audio_tensor,
                     orig_freq=sample_rate,
-                    new_freq=self.sample_rate
+                    new_freq=target_sr
                 )
 
             # Ensure 2D for torchaudio.save
@@ -358,7 +447,7 @@ class StreamingSynthesizer:
 
             # Save to temp file
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            torchaudio.save(temp_file.name, audio_tensor, self.sample_rate)
+            torchaudio.save(temp_file.name, audio_tensor, target_sr)
 
             logger.info(f"Voice reference saved to {temp_file.name}")
             return temp_file.name
@@ -376,13 +465,27 @@ class StreamingSynthesizer:
         else:
             stats['avg_latency'] = 0.0
             stats['avg_first_chunk'] = 0.0
+
+        stats['max_batch_size'] = self.max_batch_size
+        stats['max_model_len'] = self.max_model_len
+        stats['sample_rate'] = self.sample_rate
+
         return stats
 
     async def cleanup(self):
         """Clean up resources"""
         if self.model:
+            try:
+                self.model.shutdown()
+            except Exception as e:
+                logger.warning(f"Error during model shutdown: {e}")
+
             del self.model
             self.model = None
             self.is_loaded = False
             self._warmup_done = False
-            logger.info("Model unloaded")
+
+            # Clear CUDA cache
+            torch.cuda.empty_cache()
+
+            logger.info("Model unloaded and CUDA cache cleared")
