@@ -5,7 +5,7 @@
 set -e
 
 # Configuration
-GPU_ID=0
+GPU_ID=1
 INSTANCES=2
 PORTS=(8002 8012)
 
