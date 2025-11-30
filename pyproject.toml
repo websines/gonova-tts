@@ -1,7 +1,7 @@
 [project]
 name = "gonova-tts"
-version = "0.2.0"
-description = "Production-ready TTS microservice with voice cloning (vLLM-accelerated)"
+version = "0.3.0"
+description = "Production-ready TTS microservice with voice cloning (Marvis TTS)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,10 +13,11 @@ dependencies = [
     "websockets>=12.0",
     "python-multipart>=0.0.9",
 
-    # TTS - Chatterbox-vLLM (high-performance vLLM-based inference)
-    # Uses latest version with vLLM 0.10.0 V1 engine
-    # Requires: Linux/WSL2 with NVIDIA GPU
-    "chatterbox-vllm",
+    # TTS - Marvis TTS (fast, high-quality inference)
+    # Model: Marvis-AI/marvis-tts-250m-v0.2-transformers
+    # Requires: NVIDIA GPU with CUDA
+    "transformers>=4.40.0",
+    "huggingface_hub>=0.20.0",
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",

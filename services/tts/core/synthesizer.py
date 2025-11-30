@@ -1,22 +1,18 @@
 """
-TTS synthesizer using Chatterbox-vLLM for high-performance inference.
+TTS synthesizer using Marvis TTS for fast, high-quality inference.
 
 Handles:
-- Batched generation (4-10x faster than standard Chatterbox)
-- Voice cloning from reference audio
-- vLLM continuous batching for high throughput
+- Streaming sentence-by-sentence generation
+- Voice cloning from reference audio (10 seconds needed)
+- Transformers-based inference with CUDA support
 
-Performance (RTX 3090):
-- 40 minutes of audio in ~87 seconds
-- T3 token generation: ~13 seconds
-- S3Gen waveform synthesis: ~60 seconds
+Model: Marvis-AI/marvis-tts-250m-v0.2-transformers
+- 250M parameter multimodal backbone + 60M audio decoder
+- Based on Sesame CSM-1B architecture
+- 24kHz output sample rate
+- Supports English, French, German
 
-IMPORTANT: vLLM V1 engine requires running in main thread.
-Do NOT use run_in_executor for model loading or generation -
-it forces V0 engine fallback which has bugs with this model.
-
-IMPORTANT: Do NOT import torch at module level - it initializes CUDA
-which forces vLLM to use spawn multiprocessing, breaking tokenizer registration.
+Performance: Much faster than Chatterbox with similar quality.
 """
 
 import logging
@@ -27,10 +23,9 @@ from typing import Optional, AsyncGenerator, List, TYPE_CHECKING
 from pathlib import Path
 import asyncio
 
-# Delay torch imports to avoid CUDA initialization before vLLM
 if TYPE_CHECKING:
     import torch
-    import torchaudio
+    import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
@@ -84,126 +79,116 @@ def split_into_sentences(text: str, max_chars: int = 150) -> List[str]:
 
 class StreamingSynthesizer:
     """
-    High-performance Chatterbox TTS using vLLM for inference.
+    High-performance Marvis TTS using Transformers for inference.
 
-    Uses vLLM's continuous batching for 4-10x speedup over standard Chatterbox.
-    Supports batched generation for maximum throughput.
+    Uses Marvis-AI/marvis-tts-250m-v0.2-transformers model.
+    Supports voice cloning with 10 seconds of reference audio.
 
-    NOTE: Install chatterbox-vllm:
-    pip install chatterbox-vllm
+    NOTE: Install dependencies:
+    pip install transformers torch soundfile huggingface_hub
     """
+
+    # Default model ID
+    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.2-transformers"
 
     def __init__(
         self,
         model_path: Optional[str] = None,
         device: str = "cuda",
-        device_index: int = 0,  # GPU index
-        chunk_size: int = 15,  # Not used, kept for API compat
+        device_index: int = 0,
+        chunk_size: int = 15,  # Kept for API compat
         sample_rate: int = 24000,
     ):
         """
         Args:
-            model_path: Path to Chatterbox model (uses HF if None)
+            model_path: HuggingFace model ID (defaults to Marvis v0.2)
             device: "cuda" or "cpu"
             device_index: GPU index
             chunk_size: Kept for API compatibility
-            sample_rate: Output sample rate (24000 for Chatterbox)
+            sample_rate: Output sample rate (24000 for Marvis)
         """
-        self.model_path = model_path
+        self.model_path = model_path or self.MODEL_ID
         self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
 
         self.model = None
+        self.processor = None
         self.is_loaded = False
         self._warmup_done = False
 
-        # Sample rate is set by the model (S3GEN_SR = 24000)
-        self._model_sample_rate = None
-
-        # Batch size for processing (chatterbox-vllm default is 10)
-        self.max_batch_size = 10
+        # Marvis outputs at 24kHz
+        self._model_sample_rate = 24000
 
         # Stats
         self.stats = {
             'syntheses': 0,
             'total_latency': 0.0,
             'first_chunk_latency': 0.0,
-            't3_time': 0.0,
-            's3gen_time': 0.0,
             'errors': 0,
         }
 
     @property
     def sample_rate(self) -> int:
-        """Output sample rate from model"""
-        if self._model_sample_rate:
-            return self._model_sample_rate
-        return 24000  # Default S3GEN_SR
+        """Output sample rate from model (24kHz for Marvis)"""
+        return self._model_sample_rate
 
     def load_sync(self):
         """
-        Load vLLM-optimized Chatterbox model synchronously.
+        Load Marvis TTS model synchronously.
 
-        MUST be called from main thread - vLLM V1 engine doesn't work
-        in background threads (falls back to buggy V0 engine).
-
-        This downloads model weights from HuggingFace and initializes
-        the vLLM inference engine for high-throughput generation.
+        Downloads model weights from HuggingFace and initializes
+        the Transformers inference pipeline.
         """
         if self.is_loaded:
             logger.warning("Model already loaded")
             return
 
-        logger.info("Loading Chatterbox-vLLM model...")
+        logger.info(f"Loading Marvis TTS model: {self.model_path}")
 
         start_time = time.time()
 
         try:
-            # Import chatterbox-vllm
-            try:
-                from chatterbox_vllm.tts import ChatterboxTTS
-            except ImportError:
-                raise ImportError(
-                    "chatterbox-vllm not installed. "
-                    "Install from: pip install chatterbox-vllm"
-                )
+            import torch
+            from transformers import AutoProcessor, CsmForConditionalGeneration
 
-            # Load model in main thread - CRITICAL for V1 engine
-            # DO NOT use run_in_executor - it forces V0 engine fallback
-            # NOTE: ChatterboxTTS.from_pretrained() will import torch internally
-            #
-            # IMPORTANT: Must set max_model_len=1000 to avoid massive overhead
-            # Default is 131072 tokens which causes slow profiling and OOM issues
-            self.model = ChatterboxTTS.from_pretrained(
-                max_batch_size=self.max_batch_size,
-                max_model_len=1000,
+            # Determine device
+            if self.device == "cuda" and torch.cuda.is_available():
+                device_str = f"cuda:{self.device_index}"
+            else:
+                device_str = "cpu"
+                logger.warning("CUDA not available, using CPU")
+
+            logger.info(f"Loading model to device: {device_str}")
+
+            # Load processor and model
+            self.processor = AutoProcessor.from_pretrained(self.model_path)
+            self.model = CsmForConditionalGeneration.from_pretrained(
+                self.model_path,
+                device_map=device_str,
+                torch_dtype=torch.float16 if "cuda" in device_str else torch.float32,
             )
 
-            # Enable CUDA optimizations AFTER vLLM has initialized
-            # (torch is now safe to import)
-            try:
-                import torch
+            # Enable CUDA optimizations
+            if "cuda" in device_str:
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
                 logger.info("CUDA optimizations enabled")
-            except (AttributeError, ImportError):
-                pass
-
-            # Get sample rate from model
-            self._model_sample_rate = self.model.sr
 
             # Warmup with a simple generation
-            logger.info("Warming up vLLM engine...")
-            warmup_texts = ["Hello, this is a warmup test."]
-            _ = self.model.generate(
-                warmup_texts,
-                exaggeration=0.5,
-                temperature=0.8,
-                top_p=0.8,
-                repetition_penalty=2.0,
-            )
+            logger.info("Warming up Marvis TTS...")
+            warmup_text = "[0]Hello, this is a warmup test."
+            inputs = self.processor(
+                warmup_text,
+                add_special_tokens=True,
+                return_tensors="pt"
+            ).to(self.model.device)
+            if "token_type_ids" in inputs:
+                inputs.pop("token_type_ids")
+
+            with torch.no_grad():
+                _ = self.model.generate(**inputs, output_audio=True)
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -213,13 +198,15 @@ class StreamingSynthesizer:
 
         except ImportError as e:
             logger.error(f"Import error: {e}")
-            raise
+            raise ImportError(
+                "Missing dependencies. Install: pip install transformers torch soundfile"
+            )
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
 
     async def load(self):
-        """Async wrapper - just calls load_sync since it must run in main thread."""
+        """Async wrapper - just calls load_sync."""
         self.load_sync()
 
     async def synthesize_streaming(
@@ -227,7 +214,7 @@ class StreamingSynthesizer:
         text: str,
         voice_embedding: Optional[str] = None,
         chunk_size: Optional[int] = None,
-        exaggeration: float = 0.5,
+        exaggeration: float = 0.5,  # Kept for API compat, not used by Marvis
     ) -> AsyncGenerator[np.ndarray, None]:
         """
         Synthesize text to speech with sentence-by-sentence streaming.
@@ -235,13 +222,11 @@ class StreamingSynthesizer:
         Generates ONE sentence at a time for minimal TTFB (time to first byte).
         Each sentence is yielded immediately after generation.
 
-        For maximum throughput (not streaming), use synthesize_batch() instead.
-
         Args:
             text: Text to synthesize
             voice_embedding: Path to reference audio for voice cloning (None = default voice)
             chunk_size: Not used (kept for API compatibility)
-            exaggeration: Emotion intensity (0.0-1.0+, default 0.5)
+            exaggeration: Not used by Marvis (kept for API compatibility)
 
         Yields:
             np.ndarray: Audio chunks (Float32, 24kHz)
@@ -256,24 +241,17 @@ class StreamingSynthesizer:
         first_chunk_time = None
 
         try:
-            # Split text into sentences
+            # Split text into sentences for streaming
             sentences = split_into_sentences(text)
             logger.info(f"Split text into {len(sentences)} sentences for streaming")
 
             # Generate ONE sentence at a time for low TTFB
-            # This prioritizes latency over throughput
             for i, sentence in enumerate(sentences):
                 logger.debug(f"Generating sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
 
                 # Generate single sentence
-                audios = self._generate_batch(
-                    [sentence],
-                    voice_embedding,
-                    exaggeration
-                )
+                audio = self._generate_single(sentence, voice_embedding)
 
-                # Yield immediately
-                audio = audios[0]
                 if first_chunk_time is None:
                     first_chunk_time = time.time() - start_time
                     self.stats['first_chunk_latency'] += first_chunk_time
@@ -298,18 +276,18 @@ class StreamingSynthesizer:
         self,
         texts: List[str],
         voice_embedding: Optional[str] = None,
-        exaggeration: float = 0.5,
+        exaggeration: float = 0.5,  # Kept for API compat
     ) -> List[np.ndarray]:
         """
-        Synthesize multiple texts in a single batch for maximum throughput.
+        Synthesize multiple texts sequentially.
 
-        This is the most efficient method when you have multiple texts to
-        synthesize - vLLM will batch them together for ~4-10x speedup.
+        Note: Marvis doesn't support native batching like vLLM,
+        so this processes texts one at a time.
 
         Args:
             texts: List of texts to synthesize
             voice_embedding: Path to reference audio for voice cloning
-            exaggeration: Emotion intensity (0.0-1.0+)
+            exaggeration: Not used by Marvis (kept for API compatibility)
 
         Returns:
             List[np.ndarray]: List of audio arrays (Float32, 24kHz)
@@ -323,7 +301,10 @@ class StreamingSynthesizer:
         start_time = time.time()
 
         try:
-            audios = self._generate_batch(texts, voice_embedding, exaggeration)
+            audios = []
+            for text in texts:
+                audio = self._generate_single(text, voice_embedding)
+                audios.append(audio)
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += len(texts)
@@ -341,74 +322,86 @@ class StreamingSynthesizer:
             logger.error(f"Batch synthesis error: {e}")
             raise
 
-    def _generate_batch(
+    def _generate_single(
         self,
-        texts: List[str],
-        voice_embedding: Optional[str],
-        exaggeration: float
-    ) -> List[np.ndarray]:
-        """
-        Generate audio for a batch of texts using vLLM.
-
-        Runs synchronously in main thread - required for V1 engine.
-
-        Args:
-            texts: List of texts to synthesize
-            voice_embedding: Path to reference audio
-            exaggeration: Emotion intensity
-
-        Returns:
-            List of audio arrays
-        """
-        try:
-            return self._synthesize_batch_sync(texts, voice_embedding, exaggeration)
-        except Exception as e:
-            logger.error(f"Batch generation failed: {e}")
-            raise
-
-    def _synthesize_batch_sync(
-        self,
-        texts: List[str],
+        text: str,
         voice_embedding: Optional[str] = None,
-        exaggeration: float = 0.5
-    ) -> List[np.ndarray]:
+    ) -> np.ndarray:
         """
-        Synchronous batch synthesis using vLLM.
+        Generate audio for a single text using Marvis TTS.
 
         Args:
-            texts: List of texts to synthesize
-            voice_embedding: Path to reference audio
-            exaggeration: Emotion intensity
+            text: Text to synthesize
+            voice_embedding: Path to reference audio for voice cloning
 
         Returns:
-            List of numpy audio arrays
+            np.ndarray: Audio array (Float32, 24kHz)
         """
-        # Use chatterbox-vllm generate method (supports batching natively)
-        # Parameters match the original Chatterbox defaults for quality
-        audio_tensors = self.model.generate(
-            texts,
-            audio_prompt_path=voice_embedding,
-            exaggeration=exaggeration,
-            temperature=0.8,
-            top_p=0.8,
-            repetition_penalty=2.0,
-        )
+        import torch
+        import soundfile as sf
 
-        # Convert tensors to numpy arrays
-        # generate() returns list[torch.Tensor], one per input text
-        import torch  # Safe to import after vLLM initialized
-        result = []
-        for audio in audio_tensors:
-            if isinstance(audio, torch.Tensor):
-                audio = audio.squeeze().cpu().numpy()
+        try:
+            if voice_embedding:
+                # Voice cloning mode - use chat template with context
+                prompt_audio, _ = sf.read(voice_embedding)
+
+                # For voice cloning, we need context with the reference
+                # Use a generic prompt text since we don't have the original
+                context = [
+                    {
+                        "role": "0",
+                        "content": [
+                            {"type": "text", "text": ""},
+                            {"type": "audio", "path": prompt_audio}
+                        ]
+                    },
+                    {
+                        "role": "0",
+                        "content": [
+                            {"type": "text", "text": text}
+                        ]
+                    },
+                ]
+
+                inputs = self.processor.apply_chat_template(
+                    context,
+                    tokenize=True,
+                    return_dict=True,
+                )
+            else:
+                # Default voice mode - simple text input with speaker ID
+                # [0] is the default speaker
+                formatted_text = f"[0]{text}"
+                inputs = self.processor(
+                    formatted_text,
+                    add_special_tokens=True,
+                    return_tensors="pt"
+                )
+
+            # Move inputs to device
+            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
+                      for k, v in inputs.items()}
+
+            # Remove token_type_ids if present (not needed)
+            if "token_type_ids" in inputs:
+                inputs.pop("token_type_ids")
+
+            # Generate audio
+            with torch.no_grad():
+                audio = self.model.generate(**inputs, output_audio=True)
+
+            # Convert to numpy array
+            audio_np = audio[0].cpu().numpy()
 
             # Ensure float32
-            if audio.dtype != np.float32:
-                audio = audio.astype(np.float32)
+            if audio_np.dtype != np.float32:
+                audio_np = audio_np.astype(np.float32)
 
-            result.append(audio)
+            return audio_np
 
-        return result
+        except Exception as e:
+            logger.error(f"Generation failed: {e}")
+            raise
 
     async def extract_voice_embedding(
         self,
@@ -418,7 +411,7 @@ class StreamingSynthesizer:
         """
         Save reference audio for voice cloning.
 
-        Chatterbox-vLLM uses audio file paths for voice cloning,
+        Marvis uses audio file paths for voice cloning,
         so we save the audio to a file and return the path.
 
         Args:
@@ -433,28 +426,25 @@ class StreamingSynthesizer:
 
         try:
             import tempfile
-            import torch  # Safe to import after vLLM initialized
-            import torchaudio
-
-            # Convert to tensor
-            audio_tensor = torch.from_numpy(reference_audio).float()
+            import soundfile as sf
 
             # Resample to model sample rate if needed
             target_sr = self.sample_rate
             if sample_rate != target_sr:
+                import torch
+                import torchaudio
+
+                audio_tensor = torch.from_numpy(reference_audio).float()
                 audio_tensor = torchaudio.functional.resample(
                     audio_tensor,
                     orig_freq=sample_rate,
                     new_freq=target_sr
                 )
-
-            # Ensure 2D for torchaudio.save
-            if audio_tensor.dim() == 1:
-                audio_tensor = audio_tensor.unsqueeze(0)
+                reference_audio = audio_tensor.numpy()
 
             # Save to temp file
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            torchaudio.save(temp_file.name, audio_tensor, target_sr)
+            sf.write(temp_file.name, reference_audio, target_sr)
 
             logger.info(f"Voice reference saved to {temp_file.name}")
             return temp_file.name
@@ -473,7 +463,7 @@ class StreamingSynthesizer:
             stats['avg_latency'] = 0.0
             stats['avg_first_chunk'] = 0.0
 
-        stats['max_batch_size'] = self.max_batch_size
+        stats['model'] = self.model_path
         stats['sample_rate'] = self.sample_rate
 
         return stats
@@ -481,21 +471,21 @@ class StreamingSynthesizer:
     async def cleanup(self):
         """Clean up resources"""
         if self.model:
-            try:
-                self.model.shutdown()
-            except Exception as e:
-                logger.warning(f"Error during model shutdown: {e}")
-
             del self.model
             self.model = None
-            self.is_loaded = False
-            self._warmup_done = False
 
-            # Clear CUDA cache
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+        if self.processor:
+            del self.processor
+            self.processor = None
 
-            logger.info("Model unloaded and CUDA cache cleared")
+        self.is_loaded = False
+        self._warmup_done = False
+
+        # Clear CUDA cache
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        logger.info("Model unloaded and CUDA cache cleared")

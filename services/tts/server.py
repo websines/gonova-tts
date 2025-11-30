@@ -10,8 +10,6 @@ Real-time text-to-speech with:
 - Rate limiting
 
 IMPORTANT: All heavy imports must be inside if __name__ == "__main__" guard.
-When vLLM uses spawn multiprocessing, it re-imports this module in subprocesses.
-Module-level imports can interfere with chatterbox_vllm's tokenizer registration.
 """
 
 import asyncio
@@ -188,7 +186,7 @@ if __name__ == "__main__":
         """
         Main TTS service with all components integrated.
 
-        Uses Chatterbox-vLLM for high-performance inference (4-10x faster).
+        Uses Marvis TTS for fast, high-quality inference.
         """
 
         def __init__(
