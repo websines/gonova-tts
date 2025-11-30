@@ -12,13 +12,17 @@ High-performance TTS service using Chatterbox-vLLM.
 ## Quick Start
 
 ```bash
-# 1. Install chatterbox-vllm
-pip install chatterbox-vllm
+# 1. Install dependencies
+pip install -e .
 
-# 2. Create required directories
+# 2. Fix missing tokenizer.json (PyPI package bug)
+curl -sL "https://raw.githubusercontent.com/randombk/chatterbox-vllm/master/src/chatterbox_vllm/models/t3/tokenizer.json" \
+  -o .venv/lib/python3.12/site-packages/chatterbox_vllm/models/t3/tokenizer.json
+
+# 3. Create required directories
 mkdir -p t3-model t3-model-multilingual voices logs
 
-# 3. Start the service
+# 4. Start the service
 ./scripts/start_tts.sh
 ```
 
@@ -30,16 +34,14 @@ Environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CUDA_VISIBLE_DEVICES` | `0` | GPU index to use |
+| `CUDA_VISIBLE_DEVICES` | `1` | GPU index to use |
 | `TTS_PORT` | `8002` | Server port |
-| `TTS_MAX_BATCH_SIZE` | `8` | Max concurrent generations |
-| `TTS_MAX_MODEL_LEN` | `1000` | Max tokens per generation |
 | `TTS_MAX_CONNECTIONS` | `50` | Max WebSocket connections |
 
 Example:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0 TTS_PORT=8003 TTS_MAX_BATCH_SIZE=4 ./scripts/start_tts.sh
+CUDA_VISIBLE_DEVICES=0 TTS_PORT=8003 ./scripts/start_tts.sh
 ```
 
 ## API Endpoints
@@ -165,13 +167,20 @@ The start script creates this automatically. If missing:
 ./scripts/start_tts.sh
 ```
 
-### Out of Memory
+### "No such file or directory" / tokenizer.json missing
 
-Reduce batch size:
+The PyPI package is missing tokenizer.json. Download it manually:
 
 ```bash
-TTS_MAX_BATCH_SIZE=2 TTS_MAX_MODEL_LEN=500 ./scripts/start_tts.sh
+curl -sL "https://raw.githubusercontent.com/randombk/chatterbox-vllm/master/src/chatterbox_vllm/models/t3/tokenizer.json" \
+  -o .venv/lib/python3.12/site-packages/chatterbox_vllm/models/t3/tokenizer.json
 ```
+
+Note: Re-run this after reinstalling chatterbox-vllm.
+
+### Out of Memory
+
+RTX 3090 (24GB) should handle default settings. If OOM occurs, the model context length (131072) may be too large for profiling. This is usually a one-time issue during first load.
 
 ### Slow first request
 
