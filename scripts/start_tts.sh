@@ -29,9 +29,11 @@ fi
 # Create required directories
 mkdir -p logs
 mkdir -p voices
+mkdir -p t3-model
+mkdir -p t3-model-multilingual
 
-# Note: t3-model/ config.json is created by chatterbox-vllm's from_pretrained()
-# Don't override it - let the library manage the model config
+# Note: t3-model/ contents are created by chatterbox-vllm's from_pretrained()
+# It downloads weights and creates symlinks automatically
 
 # Start server from project root (so t3-model/ is accessible)
 echo ""
