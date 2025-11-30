@@ -1,25 +1,14 @@
 """
-TTS synthesizer using chatterbox-streaming for real-time inference.
+TTS synthesizer using chatterbox-streaming.
 
-Handles:
-- True streaming generation (yields audio chunks as generated)
-- Voice cloning from reference audio (5-10s needed)
-- Optimized with torch.compile for faster inference
-
-Model: ResembleAI/chatterbox (MIT License)
-- 0.5B Llama backbone
-- 24kHz output sample rate
-- Emotion exaggeration control
-
-Performance targets:
-- RTF < 1.0 (faster than realtime)
-- First chunk latency < 500ms
+Simple, direct implementation matching the official example.
 """
 
 import logging
 import time
+import torch
 import numpy as np
-from typing import Optional, AsyncGenerator, List
+from typing import Optional, Generator
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -27,387 +16,127 @@ logger = logging.getLogger(__name__)
 
 class StreamingSynthesizer:
     """
-    High-performance Chatterbox TTS with true streaming.
+    Chatterbox TTS with streaming support.
 
-    Uses chatterbox-streaming for token-level streaming with
-    progressive S3Gen audio synthesis.
-
-    NOTE: Install:
-    pip install chatterbox-streaming
+    Based on: https://github.com/davidbrowne17/chatterbox-streaming
     """
 
     def __init__(
         self,
-        model_path: Optional[str] = None,  # Not used, kept for API compat
         device: str = "cuda",
-        device_index: int = 0,
-        chunk_size: int = 25,  # Tokens per chunk (lower = lower latency)
-        sample_rate: int = 24000,
+        chunk_size: int = 25,
     ):
-        """
-        Args:
-            model_path: Not used (model downloaded from HF)
-            device: "cuda" or "cpu"
-            device_index: GPU index
-            chunk_size: Speech tokens per chunk (default 25, lower = faster first chunk)
-            sample_rate: Output sample rate (24000 for Chatterbox)
-        """
         self.device = device
-        self.device_index = device_index
         self.chunk_size = chunk_size
-
         self.model = None
         self.is_loaded = False
-        self._warmup_done = False
-
-        # Chatterbox outputs at 24kHz
-        self._model_sample_rate = 24000
-
-        # Optimization settings
-        self.context_window = 25  # Reduced from 50 for speed
-        self.use_compile = False  # Disabled - causes CUDA graph issues with streaming
-
-        # Stats
-        self.stats = {
-            'syntheses': 0,
-            'total_latency': 0.0,
-            'first_chunk_latency': 0.0,
-            'avg_rtf': 0.0,
-            'errors': 0,
-        }
 
     @property
     def sample_rate(self) -> int:
-        """Output sample rate from model (24kHz for Chatterbox)"""
-        return self._model_sample_rate
+        """Output sample rate (24kHz for Chatterbox)"""
+        return 24000
 
-    def load_sync(self):
-        """
-        Load Chatterbox model synchronously.
-
-        Downloads model weights from HuggingFace and initializes
-        with optional torch.compile optimization.
-        """
+    def load(self):
+        """Load Chatterbox model."""
         if self.is_loaded:
             logger.warning("Model already loaded")
             return
 
-        logger.info("Loading Chatterbox-streaming model...")
-
+        logger.info("Loading Chatterbox model...")
         start_time = time.time()
 
-        try:
-            import torch
-            from chatterbox.tts import ChatterboxTTS
+        from chatterbox.tts import ChatterboxTTS
 
-            # Determine device
-            if self.device == "cuda" and torch.cuda.is_available():
-                device_str = f"cuda:{self.device_index}"
-            else:
-                device_str = "cpu"
-                logger.warning("CUDA not available, using CPU")
+        # Detect device
+        if self.device == "cuda" and torch.cuda.is_available():
+            device = "cuda"
+            logger.info(f"Using CUDA: {torch.cuda.get_device_name(0)}")
+        else:
+            device = "cpu"
+            logger.warning("CUDA not available, using CPU")
 
-            logger.info(f"Loading model to device: {device_str}")
+        # Load model exactly like the example
+        self.model = ChatterboxTTS.from_pretrained(device=device)
 
-            # Load model
-            self.model = ChatterboxTTS.from_pretrained(device=device_str)
+        # Warmup
+        logger.info("Warming up model...")
+        _ = self.model.generate("Hello.")
 
-            # Enable CUDA optimizations (keep FP32 - FP16 causes dtype mismatch with conds)
-            if "cuda" in device_str:
-                torch.backends.cudnn.benchmark = True
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
+        load_time = time.time() - start_time
+        logger.info(f"Model loaded in {load_time:.2f}s")
+        self.is_loaded = True
 
-                # Apply torch.compile for speedup
-                if self.use_compile:
-                    try:
-                        logger.info("Applying torch.compile optimization...")
-                        self.model.t3.tfmr = torch.compile(
-                            self.model.t3.tfmr,
-                            mode="reduce-overhead",
-                            fullgraph=False,
-                        )
-                        logger.info("torch.compile applied to T3 transformer")
-                    except Exception as e:
-                        logger.warning(f"torch.compile failed: {e}")
-
-                logger.info("CUDA optimizations enabled")
-
-            # Warmup with a simple generation (compiles CUDA kernels)
-            print("Warming up model with test generation...", flush=True)
-            logger.info("Warming up model with test generation...")
-            warmup_text = "Hello, this is a warmup test."
-
-            # Use non-streaming generate for warmup - faster and simpler
-            warmup_wav = self.model.generate(
-                text=warmup_text,
-                exaggeration=0.5,
-                cfg_weight=0.5,
-                temperature=0.8,
-            )
-            print(f"Warmup complete: generated {warmup_wav.shape} samples", flush=True)
-            logger.info(f"Warmup complete: generated {warmup_wav.shape} samples")
-
-            # Second warmup with streaming to compile streaming path
-            print("Warming up streaming path...", flush=True)
-            logger.info("Warming up streaming path...")
-            chunk_count = 0
-            for chunk, metrics in self.model.generate_stream(
-                warmup_text,
-                chunk_size=self.chunk_size,
-                context_window=self.context_window,
-                print_metrics=False,
-            ):
-                chunk_count += 1
-            print(f"Streaming warmup complete: {chunk_count} chunks", flush=True)
-            logger.info(f"Streaming warmup complete: {chunk_count} chunks")
-
-            self._warmup_done = True
-            load_time = time.time() - start_time
-            print(f"Model loaded and warmed up in {load_time:.2f}s", flush=True)
-            logger.info(f"Model loaded and warmed up in {load_time:.2f}s")
-
-            self.is_loaded = True
-
-        except ImportError as e:
-            logger.error(f"Import error: {e}")
-            raise ImportError(
-                "chatterbox-streaming not installed. "
-                "Install: pip install chatterbox-streaming"
-            )
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
-
-    async def load(self):
-        """Async wrapper - just calls load_sync."""
-        self.load_sync()
-
-    async def synthesize_streaming(
+    def generate_stream(
         self,
         text: str,
-        voice_embedding: Optional[str] = None,
+        voice_path: Optional[str] = None,
+        exaggeration: float = 0.5,
+        cfg_weight: float = 0.5,
+        temperature: float = 0.8,
         chunk_size: Optional[int] = None,
-        exaggeration: float = 0.5,
-    ) -> AsyncGenerator[np.ndarray, None]:
+    ) -> Generator[bytes, None, None]:
         """
-        Synthesize text to speech with true token-level streaming.
+        Generate audio stream from text.
 
-        Yields audio chunks as they are generated - no waiting for
-        full sentence completion.
-
-        Args:
-            text: Text to synthesize
-            voice_embedding: Path to reference audio for voice cloning
-            chunk_size: Override default chunk size (tokens per chunk)
-            exaggeration: Emotion intensity (0.0-1.0+, default 0.5)
-
-        Yields:
-            np.ndarray: Audio chunks (Float32, 24kHz)
-        """
-        if not self.is_loaded:
-            raise RuntimeError("Model not loaded. Call load() first")
-
-        if not text.strip():
-            return
-
-        start_time = time.time()
-        first_chunk_time = None
-        total_audio_duration = 0.0
-
-        # Use provided chunk_size or default
-        _chunk_size = chunk_size or self.chunk_size
-
-        try:
-            logger.info(f"Streaming synthesis: {len(text)} chars, chunk_size={_chunk_size}")
-
-            # Generate with streaming
-            for audio_chunk, metrics in self.model.generate_stream(
-                text=text,
-                audio_prompt_path=voice_embedding,
-                exaggeration=exaggeration,
-                cfg_weight=0.5,
-                temperature=0.8,
-                chunk_size=_chunk_size,
-                context_window=self.context_window,
-                fade_duration=0.02,
-                print_metrics=False,
-            ):
-                # Track first chunk latency
-                if first_chunk_time is None:
-                    first_chunk_time = time.time() - start_time
-                    self.stats['first_chunk_latency'] += first_chunk_time
-                    logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
-
-                # Convert to numpy float32
-                audio_np = audio_chunk.squeeze().numpy()
-                if audio_np.dtype != np.float32:
-                    audio_np = audio_np.astype(np.float32)
-
-                # Track audio duration
-                chunk_duration = len(audio_np) / self._model_sample_rate
-                total_audio_duration += chunk_duration
-
-                yield audio_np
-
-            # Final stats
-            total_time = time.time() - start_time
-            self.stats['syntheses'] += 1
-            self.stats['total_latency'] += total_time
-
-            if total_audio_duration > 0:
-                rtf = total_time / total_audio_duration
-                self.stats['avg_rtf'] = (
-                    (self.stats['avg_rtf'] * (self.stats['syntheses'] - 1) + rtf)
-                    / self.stats['syntheses']
-                )
-                logger.info(
-                    f"Synthesis complete: {total_time:.2f}s, "
-                    f"audio={total_audio_duration:.2f}s, RTF={rtf:.3f}"
-                )
-
-        except Exception as e:
-            self.stats['errors'] += 1
-            logger.error(f"Synthesis error: {e}")
-            raise
-
-    def synthesize_batch(
-        self,
-        texts: List[str],
-        voice_embedding: Optional[str] = None,
-        exaggeration: float = 0.5,
-    ) -> List[np.ndarray]:
-        """
-        Synthesize multiple texts (non-streaming).
-
-        For streaming, use synthesize_streaming() instead.
-
-        Args:
-            texts: List of texts to synthesize
-            voice_embedding: Path to reference audio for voice cloning
-            exaggeration: Emotion intensity (0.0-1.0+)
-
-        Returns:
-            List[np.ndarray]: List of audio arrays (Float32, 24kHz)
-        """
-        if not self.is_loaded:
-            raise RuntimeError("Model not loaded. Call load() first")
-
-        if not texts:
-            return []
-
-        start_time = time.time()
-        results = []
-
-        try:
-            for text in texts:
-                # Use non-streaming generate for batch
-                wav = self.model.generate(
-                    text=text,
-                    audio_prompt_path=voice_embedding,
-                    exaggeration=exaggeration,
-                    cfg_weight=0.5,
-                    temperature=0.8,
-                )
-
-                audio_np = wav.squeeze().numpy()
-                if audio_np.dtype != np.float32:
-                    audio_np = audio_np.astype(np.float32)
-
-                results.append(audio_np)
-
-            total_time = time.time() - start_time
-            self.stats['syntheses'] += len(texts)
-            self.stats['total_latency'] += total_time
-
-            logger.info(
-                f"Batch synthesized {len(texts)} texts in {total_time*1000:.0f}ms"
-            )
-
-            return results
-
-        except Exception as e:
-            self.stats['errors'] += 1
-            logger.error(f"Batch synthesis error: {e}")
-            raise
-
-    async def extract_voice_embedding(
-        self,
-        reference_audio: np.ndarray,
-        sample_rate: int
-    ) -> str:
-        """
-        Save reference audio for voice cloning.
-
-        Chatterbox uses audio file paths for voice cloning,
-        so we save the audio to a file and return the path.
-
-        Args:
-            reference_audio: Audio as numpy array
-            sample_rate: Sample rate of reference audio
-
-        Returns:
-            str: Path to saved reference audio file
+        Yields raw float32 audio bytes at 24kHz.
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded")
 
-        try:
-            import tempfile
-            import soundfile as sf
+        if not text or not text.strip():
+            return
 
-            # Resample to model sample rate if needed
-            target_sr = self.sample_rate
-            if sample_rate != target_sr:
-                import librosa
-                reference_audio = librosa.resample(
-                    reference_audio,
-                    orig_sr=sample_rate,
-                    target_sr=target_sr
-                )
+        _chunk_size = chunk_size or self.chunk_size
 
-            # Save to temp file
-            temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
-            sf.write(temp_file.name, reference_audio, target_sr)
+        logger.info(f"Generating: '{text[:50]}...' chunk_size={_chunk_size}")
 
-            logger.info(f"Voice reference saved to {temp_file.name}")
-            return temp_file.name
+        # Use generate_stream exactly like the example
+        for audio_chunk, metrics in self.model.generate_stream(
+            text=text,
+            audio_prompt_path=voice_path,
+            chunk_size=_chunk_size,
+            exaggeration=exaggeration,
+            temperature=temperature,
+            cfg_weight=cfg_weight,
+            print_metrics=True,  # Shows RTF in console
+        ):
+            # Convert torch tensor to float32 bytes
+            audio_np = audio_chunk.squeeze().numpy().astype(np.float32)
+            yield audio_np.tobytes()
 
-        except Exception as e:
-            logger.error(f"Voice embedding extraction failed: {e}")
-            raise
+        logger.info("Generation complete")
 
-    def get_stats(self) -> dict:
-        """Get synthesis statistics"""
-        stats = self.stats.copy()
-        if stats['syntheses'] > 0:
-            stats['avg_latency'] = stats['total_latency'] / stats['syntheses']
-            stats['avg_first_chunk'] = stats['first_chunk_latency'] / stats['syntheses']
-        else:
-            stats['avg_latency'] = 0.0
-            stats['avg_first_chunk'] = 0.0
+    def generate(
+        self,
+        text: str,
+        voice_path: Optional[str] = None,
+        exaggeration: float = 0.5,
+    ) -> bytes:
+        """
+        Generate complete audio (non-streaming).
 
-        stats['chunk_size'] = self.chunk_size
-        stats['context_window'] = self.context_window
-        stats['sample_rate'] = self.sample_rate
-        stats['use_compile'] = self.use_compile
+        Returns raw float32 audio bytes at 24kHz.
+        """
+        if not self.is_loaded:
+            raise RuntimeError("Model not loaded")
 
-        return stats
+        wav = self.model.generate(
+            text=text,
+            audio_prompt_path=voice_path,
+            exaggeration=exaggeration,
+        )
 
-    async def cleanup(self):
-        """Clean up resources"""
+        audio_np = wav.squeeze().numpy().astype(np.float32)
+        return audio_np.tobytes()
+
+    def cleanup(self):
+        """Cleanup resources."""
         if self.model:
             del self.model
             self.model = None
-
         self.is_loaded = False
-        self._warmup_done = False
 
-        # Clear CUDA cache
-        try:
-            import torch
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        except Exception:
-            pass
 
-        logger.info("Model unloaded and CUDA cache cleared")
+        logger.info("Synthesizer cleaned up")
