@@ -176,19 +176,8 @@ class StreamingSynthesizer:
                 torch.backends.cudnn.allow_tf32 = True
                 logger.info("CUDA optimizations enabled")
 
-            # Warmup with a simple generation
-            logger.info("Warming up Marvis TTS...")
-            warmup_text = "[0]Hello."
-            input_ids = self.processor(
-                warmup_text,
-                add_special_tokens=True,
-                return_tensors="pt"
-            ).to(self.model.device).pop("input_ids")
-
-            logger.info("Running warmup generation...")
-            with torch.no_grad():
-                _ = self.model.generate(input_ids=input_ids, output_audio=True)
-            logger.info("Warmup complete")
+            # Skip warmup for faster startup - first request will be slower
+            # Warmup was causing hangs with some model versions
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -243,6 +232,7 @@ class StreamingSynthesizer:
         try:
             # Split text into sentences for streaming
             sentences = split_into_sentences(text)
+            print(f"[TTS] Split into {len(sentences)} sentences: {sentences}")
             logger.info(f"Split text into {len(sentences)} sentences for streaming")
 
             # Generate ONE sentence at a time for low TTFB
@@ -342,6 +332,7 @@ class StreamingSynthesizer:
         try:
             # Format text with speaker ID [0]
             formatted_text = f"[0]{text}"
+            print(f"[TTS] Generating: {formatted_text[:60]}...")
 
             # Get input_ids directly
             input_ids = self.processor(
@@ -349,15 +340,17 @@ class StreamingSynthesizer:
                 add_special_tokens=True,
                 return_tensors="pt"
             ).to(self.model.device).pop("input_ids")
+            print(f"[TTS] Input IDs shape: {input_ids.shape}, device: {input_ids.device}")
 
             # Generate audio
-            logger.debug(f"Generating audio for: {text[:50]}...")
+            print("[TTS] Starting model.generate()...")
             with torch.no_grad():
                 audio = self.model.generate(input_ids=input_ids, output_audio=True)
-            logger.debug("Audio generation complete")
+            print(f"[TTS] Generation complete, audio type: {type(audio)}")
 
             # Convert to numpy array
             audio_np = audio[0].cpu().numpy()
+            print(f"[TTS] Audio shape: {audio_np.shape}, dtype: {audio_np.dtype}")
 
             # Ensure float32
             if audio_np.dtype != np.float32:
@@ -366,6 +359,7 @@ class StreamingSynthesizer:
             return audio_np
 
         except Exception as e:
+            print(f"[TTS] ERROR: {e}")
             logger.error(f"Generation failed: {e}")
             raise
 
