@@ -12,15 +12,11 @@ PROJECT_ROOT=$(pwd)
 # Set GPU (use GPU 1 by default, or set CUDA_VISIBLE_DEVICES externally)
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
-# vLLM configuration
-export TTS_MAX_BATCH_SIZE=${TTS_MAX_BATCH_SIZE:-8}
-export TTS_MAX_MODEL_LEN=${TTS_MAX_MODEL_LEN:-1000}
+# Configuration (chatterbox-vllm uses its own defaults for batch_size=10, model_len=1000)
 export TTS_MAX_CONNECTIONS=${TTS_MAX_CONNECTIONS:-50}
 
 echo "Configuration:"
 echo "  GPU: $CUDA_VISIBLE_DEVICES"
-echo "  Max Batch Size: $TTS_MAX_BATCH_SIZE"
-echo "  Max Model Len: $TTS_MAX_MODEL_LEN"
 echo "  Max Connections: $TTS_MAX_CONNECTIONS"
 echo "  Working Dir: $PROJECT_ROOT"
 

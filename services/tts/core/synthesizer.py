@@ -94,8 +94,6 @@ class StreamingSynthesizer:
         device_index: int = 0,  # GPU index
         chunk_size: int = 15,  # Not used, kept for API compat
         sample_rate: int = 24000,
-        max_batch_size: int = 8,  # vLLM batch size
-        max_model_len: int = 1000,  # Max tokens per generation
     ):
         """
         Args:
@@ -104,15 +102,11 @@ class StreamingSynthesizer:
             device_index: GPU index
             chunk_size: Kept for API compatibility
             sample_rate: Output sample rate (24000 for Chatterbox)
-            max_batch_size: Maximum batch size for vLLM
-            max_model_len: Maximum tokens per generation
         """
         self.model_path = model_path
         self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
-        self.max_batch_size = max_batch_size
-        self.max_model_len = max_model_len
 
         self.model = None
         self.is_loaded = False
@@ -120,6 +114,9 @@ class StreamingSynthesizer:
 
         # Sample rate is set by the model (S3GEN_SR = 24000)
         self._model_sample_rate = None
+
+        # Batch size for processing (chatterbox-vllm default is 10)
+        self.max_batch_size = 10
 
         # Stats
         self.stats = {
@@ -149,10 +146,7 @@ class StreamingSynthesizer:
             logger.warning("Model already loaded")
             return
 
-        logger.info(
-            f"Loading Chatterbox-vLLM model (batch_size={self.max_batch_size}, "
-            f"max_len={self.max_model_len})"
-        )
+        logger.info("Loading Chatterbox-vLLM model...")
 
         start_time = time.time()
 
@@ -177,13 +171,11 @@ class StreamingSynthesizer:
 
             # Load model using from_pretrained (downloads from HuggingFace)
             # This also initializes the vLLM engine
+            # Uses chatterbox-vllm defaults: max_batch_size=10, max_model_len=1000
             loop = asyncio.get_event_loop()
             self.model = await loop.run_in_executor(
                 _executor,
-                lambda: ChatterboxTTS.from_pretrained(
-                    max_batch_size=self.max_batch_size,
-                    max_model_len=self.max_model_len,
-                )
+                lambda: ChatterboxTTS.from_pretrained()
             )
 
             # Get sample rate from model
@@ -477,7 +469,6 @@ class StreamingSynthesizer:
             stats['avg_first_chunk'] = 0.0
 
         stats['max_batch_size'] = self.max_batch_size
-        stats['max_model_len'] = self.max_model_len
         stats['sample_rate'] = self.sample_rate
 
         return stats

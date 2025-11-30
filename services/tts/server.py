@@ -58,25 +58,20 @@ class TTSService:
         device_index: int = 0,  # Use device 0 (controlled by CUDA_VISIBLE_DEVICES)
         chunk_size: int = 50,
         max_connections: int = 50,
-        max_batch_size: int = 8,  # vLLM batch size for throughput
-        max_model_len: int = 1000,  # Max tokens per generation
     ):
         self.model_path = model_path
         self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
         self.max_connections = max_connections
-        self.max_batch_size = max_batch_size
-        self.max_model_len = max_model_len
 
         # Components - using vLLM-accelerated synthesizer
+        # chatterbox-vllm uses its own defaults (max_batch_size=10, max_model_len=1000)
         self.synthesizer = StreamingSynthesizer(
             model_path=model_path,
             device=device,
             device_index=device_index,
             chunk_size=chunk_size,
-            max_batch_size=max_batch_size,
-            max_model_len=max_model_len,
         )
 
         self.voice_manager = VoiceManager(
@@ -385,15 +380,11 @@ async def startup():
     # (the startup script controls which physical GPU is visible)
     device_index = 0
 
-    # vLLM configuration from environment
-    max_batch_size = int(os.getenv("TTS_MAX_BATCH_SIZE", "8"))
-    max_model_len = int(os.getenv("TTS_MAX_MODEL_LEN", "1000"))
+    # Configuration from environment
     max_connections = int(os.getenv("TTS_MAX_CONNECTIONS", "50"))
 
     logger.info(
         "initializing_tts_service",
-        max_batch_size=max_batch_size,
-        max_model_len=max_model_len,
         max_connections=max_connections,
     )
 
@@ -403,8 +394,6 @@ async def startup():
         device_index=device_index,
         chunk_size=50,
         max_connections=max_connections,
-        max_batch_size=max_batch_size,
-        max_model_len=max_model_len,
     )
 
     await service.start()
