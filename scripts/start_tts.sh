@@ -32,14 +32,6 @@ mkdir -p voices
 mkdir -p t3-model
 mkdir -p t3-model-multilingual
 
-# Create t3-model/config.json if missing (required by vLLM to recognize the model)
-if [ ! -f "t3-model/config.json" ]; then
-    echo "Creating t3-model/config.json..."
-    curl -sL "https://raw.githubusercontent.com/randombk/chatterbox-vllm/master/t3-model/config.json" \
-        -o t3-model/config.json
-    cp t3-model/config.json t3-model-multilingual/config.json
-fi
-
 # Start server from project root (so t3-model/ is accessible)
 echo ""
 echo "Starting server..."
