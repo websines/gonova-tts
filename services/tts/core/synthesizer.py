@@ -172,7 +172,13 @@ class StreamingSynthesizer:
             # Load model in main thread - CRITICAL for V1 engine
             # DO NOT use run_in_executor - it forces V0 engine fallback
             # NOTE: ChatterboxTTS.from_pretrained() will import torch internally
-            self.model = ChatterboxTTS.from_pretrained()
+            #
+            # IMPORTANT: Must set max_model_len=1000 to avoid massive overhead
+            # Default is 131072 tokens which causes slow profiling and OOM issues
+            self.model = ChatterboxTTS.from_pretrained(
+                max_batch_size=self.max_batch_size,
+                max_model_len=1000,
+            )
 
             # Enable CUDA optimizations AFTER vLLM has initialized
             # (torch is now safe to import)
