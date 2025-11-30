@@ -95,20 +95,16 @@ class TTSService:
             chunk_size=chunk_size
         )
 
-    async def start(self):
-        """Start service (load models, start workers)"""
-        logger.info("starting_tts_service")
+    def load_model_sync(self):
+        """
+        Load model synchronously in main thread.
 
-        # Load synthesizer model (takes 3-5 seconds)
-        await self.synthesizer.load()
-
-        # Start queue manager workers
-        await self.queue_manager.start()
-
-        # Start TTS worker
-        asyncio.create_task(self._tts_worker())
-
-        logger.info("tts_service_ready")
+        MUST be called before starting the event loop - vLLM V1 engine
+        requires running in the main thread to avoid fallback to buggy V0 engine.
+        """
+        logger.info("loading_tts_model_sync")
+        self.synthesizer.load_sync()
+        logger.info("model_loaded")
 
     async def _tts_worker(self):
         """
@@ -371,32 +367,19 @@ service: Optional[TTSService] = None
 
 @app.on_event("startup")
 async def startup():
-    """Initialize service on startup"""
+    """Initialize service on startup - model is already loaded in main()"""
     global service
 
-    import os
+    if service is None:
+        raise RuntimeError("Service not initialized. Model must be loaded before server starts.")
 
-    # When CUDA_VISIBLE_DEVICES is set, always use device 0
-    # (the startup script controls which physical GPU is visible)
-    device_index = 0
+    # Start queue manager workers (async)
+    await service.queue_manager.start()
 
-    # Configuration from environment
-    max_connections = int(os.getenv("TTS_MAX_CONNECTIONS", "50"))
+    # Start TTS worker (async)
+    asyncio.create_task(service._tts_worker())
 
-    logger.info(
-        "initializing_tts_service",
-        max_connections=max_connections,
-    )
-
-    service = TTSService(
-        model_path=None,  # Uses HuggingFace pretrained model
-        device="cuda",
-        device_index=device_index,
-        chunk_size=50,
-        max_connections=max_connections,
-    )
-
-    await service.start()
+    logger.info("tts_service_ready")
 
     # Setup graceful shutdown
     def signal_handler(sig, frame):
@@ -471,18 +454,38 @@ async def metrics():
 
 
 if __name__ == "__main__":
-    # Get port from environment (for load balancing multiple instances)
     import os
+
+    # Get port from environment
     port = int(os.getenv("TTS_PORT", "8002"))
     instance_id = os.getenv("TTS_INSTANCE_ID", "1")
+
+    # When CUDA_VISIBLE_DEVICES is set, always use device 0
+    device_index = 0
+    max_connections = int(os.getenv("TTS_MAX_CONNECTIONS", "50"))
 
     logger.info(
         "starting_tts_server",
         port=port,
-        instance_id=instance_id
+        instance_id=instance_id,
+        max_connections=max_connections,
     )
 
-    # Run server
+    # Create service instance
+    service = TTSService(
+        model_path=None,  # Uses HuggingFace pretrained model
+        device="cuda",
+        device_index=device_index,
+        chunk_size=50,
+        max_connections=max_connections,
+    )
+
+    # Load model SYNCHRONOUSLY in main thread BEFORE starting uvicorn
+    # This is CRITICAL - vLLM V1 engine doesn't work in background threads
+    logger.info("loading_model_in_main_thread")
+    service.load_model_sync()
+
+    # Now start the server (startup event will start workers)
     uvicorn.run(
         app,
         host="0.0.0.0",

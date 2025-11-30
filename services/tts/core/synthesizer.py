@@ -10,6 +10,10 @@ Performance (RTX 3090):
 - 40 minutes of audio in ~87 seconds
 - T3 token generation: ~13 seconds
 - S3Gen waveform synthesis: ~60 seconds
+
+IMPORTANT: vLLM V1 engine requires running in main thread.
+Do NOT use run_in_executor for model loading or generation -
+it forces V0 engine fallback which has bugs with this model.
 """
 
 import logging
@@ -18,15 +22,11 @@ import time
 import torch
 import torchaudio
 import numpy as np
-from typing import Optional, AsyncGenerator, List, Union
+from typing import Optional, AsyncGenerator, List
 from pathlib import Path
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
-
-# Thread pool for running sync vLLM operations
-_executor = ThreadPoolExecutor(max_workers=2)
 
 
 def split_into_sentences(text: str, max_chars: int = 150) -> List[str]:
@@ -135,9 +135,12 @@ class StreamingSynthesizer:
             return self._model_sample_rate
         return 24000  # Default S3GEN_SR
 
-    async def load(self):
+    def load_sync(self):
         """
-        Load vLLM-optimized Chatterbox model at startup.
+        Load vLLM-optimized Chatterbox model synchronously.
+
+        MUST be called from main thread - vLLM V1 engine doesn't work
+        in background threads (falls back to buggy V0 engine).
 
         This downloads model weights from HuggingFace and initializes
         the vLLM inference engine for high-throughput generation.
@@ -169,13 +172,9 @@ class StreamingSynthesizer:
             except AttributeError:
                 pass
 
-            # Load model using from_pretrained (downloads from HuggingFace)
-            # This also initializes the vLLM 0.10.0 V1 engine
-            loop = asyncio.get_event_loop()
-            self.model = await loop.run_in_executor(
-                _executor,
-                lambda: ChatterboxTTS.from_pretrained()
-            )
+            # Load model in main thread - CRITICAL for V1 engine
+            # DO NOT use run_in_executor - it forces V0 engine fallback
+            self.model = ChatterboxTTS.from_pretrained()
 
             # Get sample rate from model
             self._model_sample_rate = self.model.sr
@@ -183,15 +182,12 @@ class StreamingSynthesizer:
             # Warmup with a simple generation
             logger.info("Warming up vLLM engine...")
             warmup_texts = ["Hello, this is a warmup test."]
-            _ = await loop.run_in_executor(
-                _executor,
-                lambda: self.model.generate(
-                    warmup_texts,
-                    exaggeration=0.5,
-                    temperature=0.8,
-                    top_p=0.8,
-                    repetition_penalty=2.0,
-                )
+            _ = self.model.generate(
+                warmup_texts,
+                exaggeration=0.5,
+                temperature=0.8,
+                top_p=0.8,
+                repetition_penalty=2.0,
             )
 
             self._warmup_done = True
@@ -206,6 +202,10 @@ class StreamingSynthesizer:
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
             raise
+
+    async def load(self):
+        """Async wrapper - just calls load_sync since it must run in main thread."""
+        self.load_sync()
 
     async def synthesize_streaming(
         self,
@@ -252,8 +252,8 @@ class StreamingSynthesizer:
                 batch = sentences[i:i + batch_size]
                 logger.debug(f"Generating batch {i//batch_size + 1}: {len(batch)} sentences")
 
-                # Generate batch
-                audios = await self._generate_batch(
+                # Generate batch (runs synchronously - required for V1 engine)
+                audios = self._generate_batch(
                     batch,
                     voice_embedding,
                     exaggeration
@@ -281,7 +281,7 @@ class StreamingSynthesizer:
             logger.error(f"Synthesis error: {e}")
             raise
 
-    async def synthesize_batch(
+    def synthesize_batch(
         self,
         texts: List[str],
         voice_embedding: Optional[str] = None,
@@ -310,7 +310,7 @@ class StreamingSynthesizer:
         start_time = time.time()
 
         try:
-            audios = await self._generate_batch(texts, voice_embedding, exaggeration)
+            audios = self._generate_batch(texts, voice_embedding, exaggeration)
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += len(texts)
@@ -328,7 +328,7 @@ class StreamingSynthesizer:
             logger.error(f"Batch synthesis error: {e}")
             raise
 
-    async def _generate_batch(
+    def _generate_batch(
         self,
         texts: List[str],
         voice_embedding: Optional[str],
@@ -336,6 +336,8 @@ class StreamingSynthesizer:
     ) -> List[np.ndarray]:
         """
         Generate audio for a batch of texts using vLLM.
+
+        Runs synchronously in main thread - required for V1 engine.
 
         Args:
             texts: List of texts to synthesize
@@ -345,20 +347,8 @@ class StreamingSynthesizer:
         Returns:
             List of audio arrays
         """
-        loop = asyncio.get_event_loop()
-
         try:
-            # Run vLLM generation in thread pool (it's synchronous)
-            audios = await loop.run_in_executor(
-                _executor,
-                self._synthesize_batch_sync,
-                texts,
-                voice_embedding,
-                exaggeration
-            )
-
-            return audios
-
+            return self._synthesize_batch_sync(texts, voice_embedding, exaggeration)
         except Exception as e:
             logger.error(f"Batch generation failed: {e}")
             raise
