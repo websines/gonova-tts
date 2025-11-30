@@ -133,19 +133,38 @@ class StreamingSynthesizer:
 
                 logger.info("CUDA optimizations enabled")
 
-            # Warmup with a simple generation
-            logger.info("Warming up model...")
-            warmup_text = "Hello."
+            # Warmup with a simple generation (compiles CUDA kernels)
+            print("Warming up model with test generation...", flush=True)
+            logger.info("Warming up model with test generation...")
+            warmup_text = "Hello, this is a warmup test."
+
+            # Use non-streaming generate for warmup - faster and simpler
+            warmup_wav = self.model.generate(
+                text=warmup_text,
+                exaggeration=0.5,
+                cfg_weight=0.5,
+                temperature=0.8,
+            )
+            print(f"Warmup complete: generated {warmup_wav.shape} samples", flush=True)
+            logger.info(f"Warmup complete: generated {warmup_wav.shape} samples")
+
+            # Second warmup with streaming to compile streaming path
+            print("Warming up streaming path...", flush=True)
+            logger.info("Warming up streaming path...")
+            chunk_count = 0
             for chunk, metrics in self.model.generate_stream(
                 warmup_text,
                 chunk_size=self.chunk_size,
                 context_window=self.context_window,
                 print_metrics=False,
             ):
-                pass  # Just run through to warm up
+                chunk_count += 1
+            print(f"Streaming warmup complete: {chunk_count} chunks", flush=True)
+            logger.info(f"Streaming warmup complete: {chunk_count} chunks")
 
             self._warmup_done = True
             load_time = time.time() - start_time
+            print(f"Model loaded and warmed up in {load_time:.2f}s", flush=True)
             logger.info(f"Model loaded and warmed up in {load_time:.2f}s")
 
             self.is_loaded = True
