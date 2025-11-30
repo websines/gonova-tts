@@ -250,6 +250,12 @@ if __name__ == "__main__":
                         await asyncio.sleep(0.01)
                         continue
 
+                    logger.info(
+                        "tts_worker_got_request",
+                        connection_id=request.connection_id,
+                        text_length=len(request.text)
+                    )
+
                     # Get voice embedding
                     voice_embedding = None
                     if request.voice_id and request.voice_id != "default":
@@ -264,12 +270,23 @@ if __name__ == "__main__":
                     # Synthesize with streaming
                     chunk_id = 0
                     try:
+                        logger.info(
+                            "starting_synthesis",
+                            connection_id=request.connection_id,
+                            text=request.text[:100]
+                        )
                         async for audio_chunk in self.synthesizer.synthesize_streaming(
                             text=request.text,
                             voice_embedding=voice_embedding,
                             chunk_size=request.chunk_size,
                             exaggeration=request.exaggeration,
                         ):
+                            logger.info(
+                                "got_audio_chunk",
+                                connection_id=request.connection_id,
+                                chunk_id=chunk_id,
+                                chunk_size=len(audio_chunk)
+                            )
                             await self.queue_manager.enqueue_audio_chunk(
                                 request.connection_id,
                                 audio_chunk.tobytes(),
@@ -331,6 +348,12 @@ if __name__ == "__main__":
                             data = json.loads(message)
 
                             if data.get('type') == 'synthesize':
+                                logger.info(
+                                    "received_synthesize_request",
+                                    connection_id=conn_id,
+                                    text_length=len(data.get('text', '')),
+                                    text_preview=data.get('text', '')[:50]
+                                )
                                 await self.queue_manager.enqueue_request(
                                     connection_id=conn_id,
                                     text=data.get('text', ''),
@@ -339,6 +362,7 @@ if __name__ == "__main__":
                                     exaggeration=data.get('exaggeration', 0.5),
                                     streaming=data.get('streaming', True),
                                 )
+                                logger.info("request_enqueued", connection_id=conn_id)
 
                             elif data.get('type') == 'register_voice':
                                 voice_id = data.get('voice_id')
