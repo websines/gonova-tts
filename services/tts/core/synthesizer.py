@@ -174,15 +174,21 @@ class StreamingSynthesizer:
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
-
-                # Compile model for faster inference (PyTorch 2.0+)
-                try:
-                    self.model = torch.compile(self.model, mode="reduce-overhead")
-                    logger.info("Model compiled with torch.compile")
-                except Exception as e:
-                    logger.warning(f"torch.compile failed, using eager mode: {e}")
-
                 logger.info("CUDA optimizations enabled")
+
+            # Warmup with a simple generation
+            logger.info("Warming up Marvis TTS...")
+            warmup_text = "[0]Hello, this is a warmup test."
+            inputs = self.processor(
+                warmup_text,
+                add_special_tokens=True,
+                return_tensors="pt"
+            ).to(self.model.device)
+            if "token_type_ids" in inputs:
+                inputs.pop("token_type_ids")
+
+            with torch.no_grad():
+                _ = self.model.generate(**inputs, output_audio=True)
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -237,7 +243,6 @@ class StreamingSynthesizer:
         try:
             # Split text into sentences for streaming
             sentences = split_into_sentences(text)
-            print(f"[TTS] Split into {len(sentences)} sentences: {sentences}")
             logger.info(f"Split text into {len(sentences)} sentences for streaming")
 
             # Generate ONE sentence at a time for low TTFB
@@ -327,39 +332,66 @@ class StreamingSynthesizer:
 
         Args:
             text: Text to synthesize
-            voice_embedding: Path to reference audio for voice cloning (not yet supported)
+            voice_embedding: Path to reference audio for voice cloning
 
         Returns:
             np.ndarray: Audio array (Float32, 24kHz)
         """
         import torch
+        import soundfile as sf
 
         try:
-            # Format text with speaker ID [0]
-            formatted_text = f"[0]{text}"
-            print(f"[TTS] Generating: {formatted_text[:60]}...")
+            if voice_embedding:
+                # Voice cloning mode - use chat template with context
+                prompt_audio, _ = sf.read(voice_embedding)
 
-            # Get input_ids directly
-            input_ids = self.processor(
-                formatted_text,
-                add_special_tokens=True,
-                return_tensors="pt"
-            ).to(self.model.device).pop("input_ids")
-            print(f"[TTS] Input IDs shape: {input_ids.shape}, device: {input_ids.device}")
+                # For voice cloning, we need context with the reference
+                # Use a generic prompt text since we don't have the original
+                context = [
+                    {
+                        "role": "0",
+                        "content": [
+                            {"type": "text", "text": ""},
+                            {"type": "audio", "path": prompt_audio}
+                        ]
+                    },
+                    {
+                        "role": "0",
+                        "content": [
+                            {"type": "text", "text": text}
+                        ]
+                    },
+                ]
+
+                inputs = self.processor.apply_chat_template(
+                    context,
+                    tokenize=True,
+                    return_dict=True,
+                )
+            else:
+                # Default voice mode - simple text input with speaker ID
+                # [0] is the default speaker
+                formatted_text = f"[0]{text}"
+                inputs = self.processor(
+                    formatted_text,
+                    add_special_tokens=True,
+                    return_tensors="pt"
+                )
+
+            # Move inputs to device
+            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
+                      for k, v in inputs.items()}
+
+            # Remove token_type_ids if present (not needed)
+            if "token_type_ids" in inputs:
+                inputs.pop("token_type_ids")
 
             # Generate audio
-            print("[TTS] Starting model.generate()...")
             with torch.no_grad():
-                audio = self.model.generate(
-                    input_ids=input_ids,
-                    output_audio=True,
-                    max_new_tokens=256,  # ~10 seconds of audio
-                )
-            print(f"[TTS] Generation complete, audio type: {type(audio)}")
+                audio = self.model.generate(**inputs, output_audio=True)
 
             # Convert to numpy array
             audio_np = audio[0].cpu().numpy()
-            print(f"[TTS] Audio shape: {audio_np.shape}, dtype: {audio_np.dtype}")
 
             # Ensure float32
             if audio_np.dtype != np.float32:
@@ -368,7 +400,6 @@ class StreamingSynthesizer:
             return audio_np
 
         except Exception as e:
-            print(f"[TTS] ERROR: {e}")
             logger.error(f"Generation failed: {e}")
             raise
 

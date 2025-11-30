@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
 TTS Realtime Benchmark - Measures latency and plays audio in real-time
-
-Works with Marvis TTS server (WebSocket API).
 """
 
 import asyncio
@@ -57,7 +55,9 @@ async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool
         request = {
             "type": "synthesize",
             "text": text,
-            "voice_id": "default",
+            "voice_id": "urek",
+            "chunk_size": chunk_size,
+            "exaggeration": 0.3,
             "streaming": True
         }
 
