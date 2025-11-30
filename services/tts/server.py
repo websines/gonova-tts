@@ -128,7 +128,7 @@ if __name__ == "__main__":
     # Create and load synthesizer
     synthesizer = StreamingSynthesizer(
         device="cuda",
-        chunk_size=25,
+        device_index=0,
     )
 
     logger.info("Loading model...")

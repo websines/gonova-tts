@@ -18,7 +18,7 @@ except ImportError:
     sys.exit(1)
 
 # Default server URL
-DEFAULT_URL = "ws://localhost:8002/v1/stream/tts"
+DEFAULT_URL = "wss://lmstudio.subh-dev.xyz/v1/stream/tts"
 SAMPLE_RATE = 24000
 
 
