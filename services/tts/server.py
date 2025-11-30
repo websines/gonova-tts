@@ -401,15 +401,26 @@ if __name__ == "__main__":
 
                 async def send_audio():
                     while True:
-                        chunk = await output_queue.get()
+                        if output_queue.empty():
+                            await asyncio.sleep(0.01)
+                            continue
+
+                        try:
+                            chunk = output_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            await asyncio.sleep(0.01)
+                            continue
+
                         try:
                             if not chunk.is_final:
                                 await websocket.send_bytes(chunk.audio_data)
+                                logger.info("chunk_sent", connection_id=conn_id, chunk_id=chunk.chunk_id)
                             else:
                                 await websocket.send_json({
                                     'type': 'synthesis_complete',
                                     'chunk_id': chunk.chunk_id
                                 })
+                                logger.info("synthesis_complete_sent", connection_id=conn_id)
                         except WebSocketDisconnect:
                             break
                         except Exception as e:
