@@ -5,11 +5,13 @@ Handles:
 - Voice cloning from reference audio
 - Voice embedding caching (disk + memory)
 - Voice quality validation
+
+NOTE: Do NOT import torch at module level - it initializes CUDA
+which forces vLLM to use spawn multiprocessing, breaking tokenizer registration.
 """
 
 import logging
 import base64
-import torch
 import soundfile as sf
 import numpy as np
 from pathlib import Path

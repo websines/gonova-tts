@@ -14,17 +14,23 @@ Performance (RTX 3090):
 IMPORTANT: vLLM V1 engine requires running in main thread.
 Do NOT use run_in_executor for model loading or generation -
 it forces V0 engine fallback which has bugs with this model.
+
+IMPORTANT: Do NOT import torch at module level - it initializes CUDA
+which forces vLLM to use spawn multiprocessing, breaking tokenizer registration.
 """
 
 import logging
 import re
 import time
-import torch
-import torchaudio
 import numpy as np
-from typing import Optional, AsyncGenerator, List
+from typing import Optional, AsyncGenerator, List, TYPE_CHECKING
 from pathlib import Path
 import asyncio
+
+# Delay torch imports to avoid CUDA initialization before vLLM
+if TYPE_CHECKING:
+    import torch
+    import torchaudio
 
 logger = logging.getLogger(__name__)
 
@@ -163,18 +169,21 @@ class StreamingSynthesizer:
                     "Install from: pip install chatterbox-vllm"
                 )
 
-            # Enable CUDA optimizations
+            # Load model in main thread - CRITICAL for V1 engine
+            # DO NOT use run_in_executor - it forces V0 engine fallback
+            # NOTE: ChatterboxTTS.from_pretrained() will import torch internally
+            self.model = ChatterboxTTS.from_pretrained()
+
+            # Enable CUDA optimizations AFTER vLLM has initialized
+            # (torch is now safe to import)
             try:
+                import torch
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
                 logger.info("CUDA optimizations enabled")
-            except AttributeError:
+            except (AttributeError, ImportError):
                 pass
-
-            # Load model in main thread - CRITICAL for V1 engine
-            # DO NOT use run_in_executor - it forces V0 engine fallback
-            self.model = ChatterboxTTS.from_pretrained()
 
             # Get sample rate from model
             self._model_sample_rate = self.model.sr
@@ -383,6 +392,7 @@ class StreamingSynthesizer:
 
         # Convert tensors to numpy arrays
         # generate() returns list[torch.Tensor], one per input text
+        import torch  # Safe to import after vLLM initialized
         result = []
         for audio in audio_tensors:
             if isinstance(audio, torch.Tensor):
@@ -419,6 +429,8 @@ class StreamingSynthesizer:
 
         try:
             import tempfile
+            import torch  # Safe to import after vLLM initialized
+            import torchaudio
 
             # Convert to tensor
             audio_tensor = torch.from_numpy(reference_audio).float()
@@ -476,6 +488,10 @@ class StreamingSynthesizer:
             self._warmup_done = False
 
             # Clear CUDA cache
-            torch.cuda.empty_cache()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
             logger.info("Model unloaded and CUDA cache cleared")

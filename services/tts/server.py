@@ -8,6 +8,10 @@ Real-time text-to-speech with:
 - Queue-based processing (zero data loss)
 - Graceful shutdown
 - Rate limiting
+
+IMPORTANT: Do NOT import torch at module level - it initializes CUDA
+which forces vLLM to use spawn multiprocessing, breaking tokenizer registration.
+torch is imported lazily where needed (e.g., health check).
 """
 
 import asyncio
@@ -23,7 +27,6 @@ import structlog
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 import uvicorn
-import torch
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -425,16 +428,20 @@ async def health_check():
             content={"status": "unhealthy", "reason": "Model not loaded"}
         )
 
-    # Get GPU info
+    # Get GPU info (import torch lazily - after vLLM has initialized)
     gpu_info = {}
-    if torch.cuda.is_available():
-        gpu_id = service.device_index
-        gpu_info = {
-            "gpu_id": gpu_id,
-            "gpu_name": torch.cuda.get_device_name(gpu_id),
-            "memory_allocated_gb": torch.cuda.memory_allocated(gpu_id) / 1e9,
-            "memory_reserved_gb": torch.cuda.memory_reserved(gpu_id) / 1e9,
-        }
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_id = service.device_index
+            gpu_info = {
+                "gpu_id": gpu_id,
+                "gpu_name": torch.cuda.get_device_name(gpu_id),
+                "memory_allocated_gb": torch.cuda.memory_allocated(gpu_id) / 1e9,
+                "memory_reserved_gb": torch.cuda.memory_reserved(gpu_id) / 1e9,
+            }
+    except Exception:
+        pass
 
     return {
         "status": "healthy",
