@@ -360,7 +360,7 @@ class StreamingSynthesizer:
             wav, _ = self.s3gen.inference(
                 speech_tokens=clean_tokens,
                 ref_dict=s3gen_ref,
-                n_timesteps=10,  # Diffusion steps
+                n_timesteps=5,  # Reduced from 10 for faster streaming
             )
 
         wav = wav.squeeze(0).detach().cpu().numpy()
@@ -447,6 +447,11 @@ class StreamingSynthesizer:
             total_audio_duration = 0.0
             request_id = f"stream-{time.time()}"
 
+            # Timing for profiling
+            first_token_time = None
+            token_times = []
+            s3gen_times = []
+
             # Stream tokens from vLLM
             async for output in self.engine.generate(
                 request_id=request_id,
@@ -466,13 +471,25 @@ class StreamingSynthesizer:
                             speech_token = token_id - self._SPEECH_TOKEN_OFFSET
                             token_buffer.append(speech_token)
 
+                            # Track timing
+                            now = time.time()
+                            if first_token_time is None:
+                                first_token_time = now - start_time
+                                logger.info(f"First token in {first_token_time*1000:.0f}ms")
+                            token_times.append(now)
+
                 # Process chunk when buffer is full
                 if len(token_buffer) >= chunk_size:
                     new_tokens = torch.tensor(token_buffer, dtype=torch.long, device=self.device)
 
+                    # Time S3Gen
+                    s3gen_start = time.time()
                     audio_chunk, audio_duration = self._process_token_chunk(
                         new_tokens, all_tokens, s3gen_ref
                     )
+                    s3gen_time = time.time() - s3gen_start
+                    s3gen_times.append(s3gen_time)
+                    logger.info(f"S3Gen chunk took {s3gen_time*1000:.0f}ms")
 
                     if audio_chunk is not None:
                         # Update metrics
@@ -519,6 +536,18 @@ class StreamingSynthesizer:
             self.stats['total_latency'] += metrics.total_generation_time
             if metrics.latency_to_first_chunk:
                 self.stats['first_chunk_latency'] += metrics.latency_to_first_chunk
+
+            # Performance summary
+            total_tokens = len(token_times)
+            if total_tokens > 1 and token_times[-1] > token_times[0]:
+                token_gen_time = token_times[-1] - token_times[0]
+                tok_per_sec = (total_tokens - 1) / token_gen_time
+                avg_s3gen = sum(s3gen_times) / len(s3gen_times) if s3gen_times else 0
+                logger.info(
+                    f"T3 speed: {tok_per_sec:.1f} tok/s, "
+                    f"Avg S3Gen: {avg_s3gen*1000:.0f}ms/chunk, "
+                    f"First token: {first_token_time*1000:.0f}ms"
+                )
 
             logger.info(
                 f"Streamed {metrics.chunk_count} chunks in {metrics.total_generation_time:.2f}s, "
