@@ -18,8 +18,8 @@ dependencies = [
     # Requires: Linux/WSL2 with NVIDIA GPU
     "chatterbox-vllm",
 
-    # vLLM dependencies (pinned for compatibility)
-    "vllm==0.10.0",
+    # vLLM dependencies (pinned for compatibility with chatterbox-vllm 0.2.1)
+    "vllm==0.9.2",
     "transformers",
     "tokenizers",
     "librosa",
