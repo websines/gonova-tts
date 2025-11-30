@@ -170,16 +170,11 @@ class StreamingSynthesizer:
                 pass
 
             # Load model using from_pretrained (downloads from HuggingFace)
-            # This also initializes the vLLM engine
-            # - compile=True enables CUDA graphs for performance
-            # - max_batch_size controls vLLM concurrency
+            # This also initializes the vLLM 0.10.0 V1 engine
             loop = asyncio.get_event_loop()
             self.model = await loop.run_in_executor(
                 _executor,
-                lambda: ChatterboxTTS.from_pretrained(
-                    compile=True,
-                    max_batch_size=1,
-                )
+                lambda: ChatterboxTTS.from_pretrained()
             )
 
             # Get sample rate from model
