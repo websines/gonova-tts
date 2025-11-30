@@ -178,21 +178,17 @@ class StreamingSynthesizer:
 
             # Warmup with a simple generation
             logger.info("Warming up Marvis TTS...")
-            warmup_context = [
-                {"role": "0", "content": [{"type": "text", "text": "Hello."}]}
-            ]
-            inputs = self.processor.apply_chat_template(
-                warmup_context,
-                tokenize=True,
-                return_dict=True,
-            )
-            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
-                      for k, v in inputs.items()}
-            if "token_type_ids" in inputs:
-                inputs.pop("token_type_ids")
+            warmup_text = "[0]Hello."
+            input_ids = self.processor(
+                warmup_text,
+                add_special_tokens=True,
+                return_tensors="pt"
+            ).to(self.model.device).pop("input_ids")
 
+            logger.info("Running warmup generation...")
             with torch.no_grad():
-                _ = self.model.generate(**inputs, output_audio=True)
+                _ = self.model.generate(input_ids=input_ids, output_audio=True)
+            logger.info("Warmup complete")
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -336,63 +332,29 @@ class StreamingSynthesizer:
 
         Args:
             text: Text to synthesize
-            voice_embedding: Path to reference audio for voice cloning
+            voice_embedding: Path to reference audio for voice cloning (not yet supported)
 
         Returns:
             np.ndarray: Audio array (Float32, 24kHz)
         """
         import torch
-        import soundfile as sf
 
         try:
-            if voice_embedding:
-                # Voice cloning mode - use chat template with reference audio
-                prompt_audio, _ = sf.read(voice_embedding)
+            # Format text with speaker ID [0]
+            formatted_text = f"[0]{text}"
 
-                context = [
-                    {
-                        "role": "0",
-                        "content": [
-                            {"type": "text", "text": ""},
-                            {"type": "audio", "path": prompt_audio}
-                        ]
-                    },
-                    {
-                        "role": "0",
-                        "content": [
-                            {"type": "text", "text": text}
-                        ]
-                    },
-                ]
-            else:
-                # Default voice mode - use chat template with just text
-                context = [
-                    {
-                        "role": "0",
-                        "content": [
-                            {"type": "text", "text": text}
-                        ]
-                    },
-                ]
-
-            # Apply chat template for proper formatting
-            inputs = self.processor.apply_chat_template(
-                context,
-                tokenize=True,
-                return_dict=True,
-            )
-
-            # Move inputs to device
-            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
-                      for k, v in inputs.items()}
-
-            # Remove token_type_ids if present (not needed)
-            if "token_type_ids" in inputs:
-                inputs.pop("token_type_ids")
+            # Get input_ids directly
+            input_ids = self.processor(
+                formatted_text,
+                add_special_tokens=True,
+                return_tensors="pt"
+            ).to(self.model.device).pop("input_ids")
 
             # Generate audio
+            logger.debug(f"Generating audio for: {text[:50]}...")
             with torch.no_grad():
-                audio = self.model.generate(**inputs, output_audio=True)
+                audio = self.model.generate(input_ids=input_ids, output_audio=True)
+            logger.debug("Audio generation complete")
 
             # Convert to numpy array
             audio_np = audio[0].cpu().numpy()
