@@ -139,6 +139,30 @@ nvidia-smi
 
 ## Troubleshooting
 
+### "Tokenizer EnTokenizer not found" / vLLM spawn multiprocessing error
+
+**This is the most common issue.** vLLM uses `spawn` multiprocessing which re-executes the main script in subprocesses. The `EnTokenizer` must be registered before vLLM initializes.
+
+**The fix:** Your entry point script MUST import `chatterbox_vllm` at the **top level** (outside `if __name__ == "__main__":`):
+
+```python
+# CORRECT - import at top level, BEFORE the main guard
+from chatterbox_vllm.tts import ChatterboxTTS
+
+if __name__ == "__main__":
+    # ... rest of your code
+```
+
+```python
+# WRONG - import inside the main guard won't work with spawn
+if __name__ == "__main__":
+    from chatterbox_vllm.tts import ChatterboxTTS  # TOO LATE!
+```
+
+When vLLM spawns a subprocess, it re-imports your script. The top-level import triggers `chatterbox_vllm/models/t3/__init__.py` which registers the tokenizer with vLLM's `TokenizerRegistry`. Without this, the subprocess doesn't know about `EnTokenizer`.
+
+Use `services/tts/run_server.py` as the entry point - it has this pattern correct.
+
 ### CUDA assertion errors / "srcIndex < srcSelectDimSize"
 
 This can be caused by:

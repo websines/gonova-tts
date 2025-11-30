@@ -226,10 +226,10 @@ class StreamingSynthesizer:
         """
         Synthesize text to speech with sentence-by-sentence streaming.
 
-        Splits text into sentences and generates each sentence separately,
-        yielding audio as soon as each sentence is complete.
+        Generates ONE sentence at a time for minimal TTFB (time to first byte).
+        Each sentence is yielded immediately after generation.
 
-        For maximum throughput, use synthesize_batch() instead.
+        For maximum throughput (not streaming), use synthesize_batch() instead.
 
         Args:
             text: Text to synthesize
@@ -252,37 +252,35 @@ class StreamingSynthesizer:
         try:
             # Split text into sentences
             sentences = split_into_sentences(text)
-            logger.info(f"Split text into {len(sentences)} sentences")
+            logger.info(f"Split text into {len(sentences)} sentences for streaming")
 
-            # Generate sentences in batches for efficiency
-            batch_size = min(self.max_batch_size, len(sentences))
+            # Generate ONE sentence at a time for low TTFB
+            # This prioritizes latency over throughput
+            for i, sentence in enumerate(sentences):
+                logger.debug(f"Generating sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
 
-            for i in range(0, len(sentences), batch_size):
-                batch = sentences[i:i + batch_size]
-                logger.debug(f"Generating batch {i//batch_size + 1}: {len(batch)} sentences")
-
-                # Generate batch (runs synchronously - required for V1 engine)
+                # Generate single sentence
                 audios = self._generate_batch(
-                    batch,
+                    [sentence],
                     voice_embedding,
                     exaggeration
                 )
 
-                # Yield each audio in order
-                for audio in audios:
-                    if first_chunk_time is None:
-                        first_chunk_time = time.time() - start_time
-                        self.stats['first_chunk_latency'] += first_chunk_time
-                        logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
+                # Yield immediately
+                audio = audios[0]
+                if first_chunk_time is None:
+                    first_chunk_time = time.time() - start_time
+                    self.stats['first_chunk_latency'] += first_chunk_time
+                    logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
 
-                    yield audio
+                yield audio
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += 1
             self.stats['total_latency'] += total_time
 
             logger.info(
-                f"Synthesized {len(sentences)} sentences in {total_time*1000:.0f}ms"
+                f"Streamed {len(sentences)} sentences in {total_time*1000:.0f}ms"
             )
 
         except Exception as e:
