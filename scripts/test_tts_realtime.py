@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 TTS Realtime Benchmark - Measures latency and plays audio in real-time
+
+Tests chatterbox-streaming TTS server via WebSocket.
 """
 
 import asyncio
@@ -18,22 +20,31 @@ except ImportError:
     print("Install dependencies: pip install websockets sounddevice numpy")
     sys.exit(1)
 
-# Configuration
+# Configuration - default to localhost
 TTS_URL = "wss://lmstudio.subh-dev.xyz/tts/v1/stream/tts"
 SAMPLE_RATE = 24000
 
 
-async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool = False):
+async def test_tts_realtime(
+    text: str,
+    url: str = TTS_URL,
+    exaggeration: float = 0.5,
+    play_realtime: bool = False
+):
     """Test TTS with real-time audio playback and latency measurement"""
 
-    ssl_context = ssl.create_default_context()
-    ssl_context.check_hostname = False
-    ssl_context.verify_mode = ssl.CERT_NONE
+    # Use SSL only for wss://
+    ssl_context = None
+    if url.startswith("wss://"):
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
 
     print(f"\n{'='*60}")
+    print(f"URL: {url}")
     print(f"Text: \"{text}\"")
     print(f"Text length: {len(text)} chars")
-    print(f"Chunk size: {chunk_size} tokens")
+    print(f"Exaggeration: {exaggeration}")
     print(f"Realtime playback: {play_realtime}")
     print(f"{'='*60}\n")
 
@@ -47,7 +58,7 @@ async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool
         stream = sd.OutputStream(samplerate=SAMPLE_RATE, channels=1, dtype='int16')
         stream.start()
 
-    async with websockets.connect(TTS_URL, ssl=ssl_context) as ws:
+    async with websockets.connect(url, ssl=ssl_context) as ws:
         connect_time = time.perf_counter()
         print(f"[{(connect_time - start_time)*1000:.0f}ms] Connected to server")
 
@@ -55,9 +66,8 @@ async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool
         request = {
             "type": "synthesize",
             "text": text,
-            "voice_id": "urek",
-            "chunk_size": chunk_size,
-            "exaggeration": 0.3,
+            "voice_id": "default",
+            "exaggeration": exaggeration,
             "streaming": True
         }
 
@@ -145,7 +155,7 @@ async def test_tts_realtime(text: str, chunk_size: int = 50, play_realtime: bool
     }
 
 
-async def benchmark(chunk_size: int = 50):
+async def benchmark(url: str = TTS_URL):
     """Run benchmark with multiple texts"""
 
     texts = [
@@ -156,12 +166,13 @@ async def benchmark(chunk_size: int = 50):
     ]
 
     print("\n" + "="*60)
-    print(f"TTS REALTIME BENCHMARK (chunk_size={chunk_size})")
+    print(f"TTS REALTIME BENCHMARK")
+    print(f"Server: {url}")
     print("="*60)
 
     results = []
     for text in texts:
-        result = await test_tts_realtime(text, chunk_size=chunk_size)
+        result = await test_tts_realtime(text, url=url)
         results.append(result)
         await asyncio.sleep(1)  # Brief pause between tests
 
@@ -184,17 +195,23 @@ async def benchmark(chunk_size: int = 50):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="TTS Realtime Benchmark")
     parser.add_argument("text", nargs="*", help="Text to synthesize")
-    parser.add_argument("-c", "--chunk-size", type=int, default=50, help="Chunk size in tokens (default: 50)")
+    parser.add_argument("-u", "--url", type=str, default=TTS_URL, help=f"WebSocket URL (default: {TTS_URL})")
+    parser.add_argument("-e", "--exaggeration", type=float, default=0.5, help="Emotion exaggeration 0.0-1.0+ (default: 0.5)")
     parser.add_argument("-r", "--realtime", action="store_true", help="Play audio in realtime as chunks arrive")
     parser.add_argument("-b", "--benchmark", action="store_true", help="Run benchmark with multiple texts")
 
     args = parser.parse_args()
 
     if args.benchmark:
-        asyncio.run(benchmark(chunk_size=args.chunk_size))
+        asyncio.run(benchmark(url=args.url))
     elif args.text:
         text = " ".join(args.text)
-        asyncio.run(test_tts_realtime(text, chunk_size=args.chunk_size, play_realtime=args.realtime))
+        asyncio.run(test_tts_realtime(text, url=args.url, exaggeration=args.exaggeration, play_realtime=args.realtime))
     else:
         # Default test
-        asyncio.run(test_tts_realtime("Hello, this is a real-time text to speech test.", chunk_size=args.chunk_size, play_realtime=args.realtime))
+        asyncio.run(test_tts_realtime(
+            "Hello, this is a real-time text to speech test.",
+            url=args.url,
+            exaggeration=args.exaggeration,
+            play_realtime=args.realtime
+        ))

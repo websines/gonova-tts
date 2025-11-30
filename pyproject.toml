@@ -1,7 +1,7 @@
 [project]
 name = "gonova-tts"
-version = "0.3.0"
-description = "Production-ready TTS microservice with voice cloning (Marvis TTS)"
+version = "0.4.0"
+description = "Production-ready TTS microservice with voice cloning (chatterbox-streaming)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -13,11 +13,10 @@ dependencies = [
     "websockets>=12.0",
     "python-multipart>=0.0.9",
 
-    # TTS - Marvis TTS (fast, high-quality inference)
-    # Model: Marvis-AI/marvis-tts-250m-v0.2-transformers
-    # Requires: NVIDIA GPU with CUDA
-    "transformers>=4.40.0",
-    "huggingface_hub>=0.20.0",
+    # TTS - chatterbox-streaming (MIT license, real-time streaming)
+    # Model: ResembleAI/chatterbox
+    # Requires: NVIDIA GPU with CUDA (12GB+ VRAM)
+    "chatterbox-streaming",
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",
@@ -27,6 +26,7 @@ dependencies = [
     "numpy>=1.24.0",
     "scipy>=1.11.0",
     "soundfile>=0.12.0",
+    "librosa>=0.10.0",
 
     # Utilities
     "pydantic>=2.5.0",

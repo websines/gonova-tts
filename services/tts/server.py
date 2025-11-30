@@ -186,7 +186,7 @@ if __name__ == "__main__":
         """
         Main TTS service with all components integrated.
 
-        Uses Marvis TTS for fast, high-quality inference.
+        Uses chatterbox-streaming for real-time TTS with true streaming.
         """
 
         def __init__(
@@ -436,7 +436,7 @@ if __name__ == "__main__":
         model_path=None,
         device="cuda",
         device_index=device_index,
-        chunk_size=50,
+        chunk_size=25,  # Lower = faster first chunk latency
         max_connections=max_connections,
     )
 

@@ -1,156 +1,104 @@
 """
-TTS synthesizer using Marvis TTS for fast, high-quality inference.
+TTS synthesizer using chatterbox-streaming for real-time inference.
 
 Handles:
-- Streaming sentence-by-sentence generation
-- Voice cloning from reference audio (10 seconds needed)
-- Transformers-based inference with CUDA support
+- True streaming generation (yields audio chunks as generated)
+- Voice cloning from reference audio (5-10s needed)
+- Optimized with torch.compile for faster inference
 
-Model: Marvis-AI/marvis-tts-250m-v0.2-transformers
-- 250M parameter multimodal backbone + 60M audio decoder
-- Based on Sesame CSM-1B architecture
+Model: ResembleAI/chatterbox (MIT License)
+- 0.5B Llama backbone
 - 24kHz output sample rate
-- Supports English, French, German
+- Emotion exaggeration control
 
-Performance: Much faster than Chatterbox with similar quality.
+Performance targets:
+- RTF < 1.0 (faster than realtime)
+- First chunk latency < 500ms
 """
 
 import logging
-import re
 import time
 import numpy as np
-from typing import Optional, AsyncGenerator, List, TYPE_CHECKING
+from typing import Optional, AsyncGenerator, List
 from pathlib import Path
-import asyncio
-
-if TYPE_CHECKING:
-    import torch
-    import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
 
-def split_into_sentences(text: str, max_chars: int = 150) -> List[str]:
-    """
-    Split text into sentences for streaming.
-
-    Uses regex to split on sentence-ending punctuation while preserving
-    the punctuation marks. Also splits long sentences on commas.
-
-    Args:
-        text: Text to split
-        max_chars: Maximum characters per chunk (splits on comma if exceeded)
-    """
-    # First split on .!? followed by space or end of string
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-
-    # Filter out empty strings and strip whitespace
-    sentences = [s.strip() for s in sentences if s.strip()]
-
-    # Further split long sentences on commas
-    result = []
-    for sentence in sentences:
-        if len(sentence) <= max_chars:
-            result.append(sentence)
-        else:
-            # Split on comma followed by space
-            parts = re.split(r',\s+', sentence)
-            current = ""
-            for part in parts:
-                if not current:
-                    current = part
-                elif len(current) + len(part) + 2 <= max_chars:
-                    current += ", " + part
-                else:
-                    # Add comma back if not ending with punctuation
-                    if current and not current[-1] in '.!?':
-                        current += ","
-                    result.append(current)
-                    current = part
-
-            if current:
-                # Ensure last part has proper ending
-                if not current[-1] in '.!?,':
-                    current += "."
-                result.append(current)
-
-    return result
-
-
 class StreamingSynthesizer:
     """
-    High-performance Marvis TTS using Transformers for inference.
+    High-performance Chatterbox TTS with true streaming.
 
-    Uses Marvis-AI/marvis-tts-250m-v0.2-transformers model.
-    Supports voice cloning with 10 seconds of reference audio.
+    Uses chatterbox-streaming for token-level streaming with
+    progressive S3Gen audio synthesis.
 
-    NOTE: Install dependencies:
-    pip install transformers torch soundfile huggingface_hub
+    NOTE: Install:
+    pip install chatterbox-streaming
     """
-
-    # Default model ID
-    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.2-transformers"
 
     def __init__(
         self,
-        model_path: Optional[str] = None,
+        model_path: Optional[str] = None,  # Not used, kept for API compat
         device: str = "cuda",
         device_index: int = 0,
-        chunk_size: int = 15,  # Kept for API compat
+        chunk_size: int = 25,  # Tokens per chunk (lower = lower latency)
         sample_rate: int = 24000,
     ):
         """
         Args:
-            model_path: HuggingFace model ID (defaults to Marvis v0.2)
+            model_path: Not used (model downloaded from HF)
             device: "cuda" or "cpu"
             device_index: GPU index
-            chunk_size: Kept for API compatibility
-            sample_rate: Output sample rate (24000 for Marvis)
+            chunk_size: Speech tokens per chunk (default 25, lower = faster first chunk)
+            sample_rate: Output sample rate (24000 for Chatterbox)
         """
-        self.model_path = model_path or self.MODEL_ID
         self.device = device
         self.device_index = device_index
         self.chunk_size = chunk_size
 
         self.model = None
-        self.processor = None
         self.is_loaded = False
         self._warmup_done = False
 
-        # Marvis outputs at 24kHz
+        # Chatterbox outputs at 24kHz
         self._model_sample_rate = 24000
+
+        # Optimization settings
+        self.context_window = 25  # Reduced from 50 for speed
+        self.use_compile = True   # Enable torch.compile
 
         # Stats
         self.stats = {
             'syntheses': 0,
             'total_latency': 0.0,
             'first_chunk_latency': 0.0,
+            'avg_rtf': 0.0,
             'errors': 0,
         }
 
     @property
     def sample_rate(self) -> int:
-        """Output sample rate from model (24kHz for Marvis)"""
+        """Output sample rate from model (24kHz for Chatterbox)"""
         return self._model_sample_rate
 
     def load_sync(self):
         """
-        Load Marvis TTS model synchronously.
+        Load Chatterbox model synchronously.
 
         Downloads model weights from HuggingFace and initializes
-        the Transformers inference pipeline.
+        with optional torch.compile optimization.
         """
         if self.is_loaded:
             logger.warning("Model already loaded")
             return
 
-        logger.info(f"Loading Marvis TTS model: {self.model_path}")
+        logger.info("Loading Chatterbox-streaming model...")
 
         start_time = time.time()
 
         try:
             import torch
-            from transformers import AutoProcessor, CsmForConditionalGeneration
+            from chatterbox.tts import ChatterboxTTS
 
             # Determine device
             if self.device == "cuda" and torch.cuda.is_available():
@@ -161,34 +109,46 @@ class StreamingSynthesizer:
 
             logger.info(f"Loading model to device: {device_str}")
 
-            # Load processor and model
-            self.processor = AutoProcessor.from_pretrained(self.model_path)
-            self.model = CsmForConditionalGeneration.from_pretrained(
-                self.model_path,
-                device_map=device_str,
-                torch_dtype=torch.float16 if "cuda" in device_str else torch.float32,
-            )
+            # Load model
+            self.model = ChatterboxTTS.from_pretrained(device=device_str)
+
+            # Convert to FP16 for faster inference
+            if "cuda" in device_str:
+                self.model.t3 = self.model.t3.half()
+                self.model.s3gen = self.model.s3gen.half()
+                logger.info("Model converted to FP16")
 
             # Enable CUDA optimizations
             if "cuda" in device_str:
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
+
+                # Apply torch.compile for speedup
+                if self.use_compile:
+                    try:
+                        logger.info("Applying torch.compile optimization...")
+                        self.model.t3.tfmr = torch.compile(
+                            self.model.t3.tfmr,
+                            mode="reduce-overhead",
+                            fullgraph=False,
+                        )
+                        logger.info("torch.compile applied to T3 transformer")
+                    except Exception as e:
+                        logger.warning(f"torch.compile failed: {e}")
+
                 logger.info("CUDA optimizations enabled")
 
             # Warmup with a simple generation
-            logger.info("Warming up Marvis TTS...")
-            warmup_text = "[0]Hello, this is a warmup test."
-            inputs = self.processor(
+            logger.info("Warming up model...")
+            warmup_text = "Hello."
+            for chunk, metrics in self.model.generate_stream(
                 warmup_text,
-                add_special_tokens=True,
-                return_tensors="pt"
-            ).to(self.model.device)
-            if "token_type_ids" in inputs:
-                inputs.pop("token_type_ids")
-
-            with torch.no_grad():
-                _ = self.model.generate(**inputs, output_audio=True)
+                chunk_size=self.chunk_size,
+                context_window=self.context_window,
+                print_metrics=False,
+            ):
+                pass  # Just run through to warm up
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -199,7 +159,8 @@ class StreamingSynthesizer:
         except ImportError as e:
             logger.error(f"Import error: {e}")
             raise ImportError(
-                "Missing dependencies. Install: pip install transformers torch soundfile"
+                "chatterbox-streaming not installed. "
+                "Install: pip install chatterbox-streaming"
             )
         except Exception as e:
             logger.error(f"Failed to load model: {e}")
@@ -214,19 +175,19 @@ class StreamingSynthesizer:
         text: str,
         voice_embedding: Optional[str] = None,
         chunk_size: Optional[int] = None,
-        exaggeration: float = 0.5,  # Kept for API compat, not used by Marvis
+        exaggeration: float = 0.5,
     ) -> AsyncGenerator[np.ndarray, None]:
         """
-        Synthesize text to speech with sentence-by-sentence streaming.
+        Synthesize text to speech with true token-level streaming.
 
-        Generates ONE sentence at a time for minimal TTFB (time to first byte).
-        Each sentence is yielded immediately after generation.
+        Yields audio chunks as they are generated - no waiting for
+        full sentence completion.
 
         Args:
             text: Text to synthesize
-            voice_embedding: Path to reference audio for voice cloning (None = default voice)
-            chunk_size: Not used (kept for API compatibility)
-            exaggeration: Not used by Marvis (kept for API compatibility)
+            voice_embedding: Path to reference audio for voice cloning
+            chunk_size: Override default chunk size (tokens per chunk)
+            exaggeration: Emotion intensity (0.0-1.0+, default 0.5)
 
         Yields:
             np.ndarray: Audio chunks (Float32, 24kHz)
@@ -239,33 +200,58 @@ class StreamingSynthesizer:
 
         start_time = time.time()
         first_chunk_time = None
+        total_audio_duration = 0.0
+
+        # Use provided chunk_size or default
+        _chunk_size = chunk_size or self.chunk_size
 
         try:
-            # Split text into sentences for streaming
-            sentences = split_into_sentences(text)
-            logger.info(f"Split text into {len(sentences)} sentences for streaming")
+            logger.info(f"Streaming synthesis: {len(text)} chars, chunk_size={_chunk_size}")
 
-            # Generate ONE sentence at a time for low TTFB
-            for i, sentence in enumerate(sentences):
-                logger.debug(f"Generating sentence {i+1}/{len(sentences)}: {sentence[:50]}...")
-
-                # Generate single sentence
-                audio = self._generate_single(sentence, voice_embedding)
-
+            # Generate with streaming
+            for audio_chunk, metrics in self.model.generate_stream(
+                text=text,
+                audio_prompt_path=voice_embedding,
+                exaggeration=exaggeration,
+                cfg_weight=0.5,
+                temperature=0.8,
+                chunk_size=_chunk_size,
+                context_window=self.context_window,
+                fade_duration=0.02,
+                print_metrics=False,
+            ):
+                # Track first chunk latency
                 if first_chunk_time is None:
                     first_chunk_time = time.time() - start_time
                     self.stats['first_chunk_latency'] += first_chunk_time
                     logger.info(f"First chunk in {first_chunk_time*1000:.0f}ms")
 
-                yield audio
+                # Convert to numpy float32
+                audio_np = audio_chunk.squeeze().numpy()
+                if audio_np.dtype != np.float32:
+                    audio_np = audio_np.astype(np.float32)
 
+                # Track audio duration
+                chunk_duration = len(audio_np) / self._model_sample_rate
+                total_audio_duration += chunk_duration
+
+                yield audio_np
+
+            # Final stats
             total_time = time.time() - start_time
             self.stats['syntheses'] += 1
             self.stats['total_latency'] += total_time
 
-            logger.info(
-                f"Streamed {len(sentences)} sentences in {total_time*1000:.0f}ms"
-            )
+            if total_audio_duration > 0:
+                rtf = total_time / total_audio_duration
+                self.stats['avg_rtf'] = (
+                    (self.stats['avg_rtf'] * (self.stats['syntheses'] - 1) + rtf)
+                    / self.stats['syntheses']
+                )
+                logger.info(
+                    f"Synthesis complete: {total_time:.2f}s, "
+                    f"audio={total_audio_duration:.2f}s, RTF={rtf:.3f}"
+                )
 
         except Exception as e:
             self.stats['errors'] += 1
@@ -276,18 +262,17 @@ class StreamingSynthesizer:
         self,
         texts: List[str],
         voice_embedding: Optional[str] = None,
-        exaggeration: float = 0.5,  # Kept for API compat
+        exaggeration: float = 0.5,
     ) -> List[np.ndarray]:
         """
-        Synthesize multiple texts sequentially.
+        Synthesize multiple texts (non-streaming).
 
-        Note: Marvis doesn't support native batching like vLLM,
-        so this processes texts one at a time.
+        For streaming, use synthesize_streaming() instead.
 
         Args:
             texts: List of texts to synthesize
             voice_embedding: Path to reference audio for voice cloning
-            exaggeration: Not used by Marvis (kept for API compatibility)
+            exaggeration: Emotion intensity (0.0-1.0+)
 
         Returns:
             List[np.ndarray]: List of audio arrays (Float32, 24kHz)
@@ -299,108 +284,38 @@ class StreamingSynthesizer:
             return []
 
         start_time = time.time()
+        results = []
 
         try:
-            audios = []
             for text in texts:
-                audio = self._generate_single(text, voice_embedding)
-                audios.append(audio)
+                # Use non-streaming generate for batch
+                wav = self.model.generate(
+                    text=text,
+                    audio_prompt_path=voice_embedding,
+                    exaggeration=exaggeration,
+                    cfg_weight=0.5,
+                    temperature=0.8,
+                )
+
+                audio_np = wav.squeeze().numpy()
+                if audio_np.dtype != np.float32:
+                    audio_np = audio_np.astype(np.float32)
+
+                results.append(audio_np)
 
             total_time = time.time() - start_time
             self.stats['syntheses'] += len(texts)
             self.stats['total_latency'] += total_time
 
             logger.info(
-                f"Batch synthesized {len(texts)} texts in {total_time*1000:.0f}ms "
-                f"({total_time/len(texts)*1000:.0f}ms per text)"
+                f"Batch synthesized {len(texts)} texts in {total_time*1000:.0f}ms"
             )
 
-            return audios
+            return results
 
         except Exception as e:
             self.stats['errors'] += 1
             logger.error(f"Batch synthesis error: {e}")
-            raise
-
-    def _generate_single(
-        self,
-        text: str,
-        voice_embedding: Optional[str] = None,
-    ) -> np.ndarray:
-        """
-        Generate audio for a single text using Marvis TTS.
-
-        Args:
-            text: Text to synthesize
-            voice_embedding: Path to reference audio for voice cloning
-
-        Returns:
-            np.ndarray: Audio array (Float32, 24kHz)
-        """
-        import torch
-        import soundfile as sf
-
-        try:
-            if voice_embedding:
-                # Voice cloning mode - use chat template with context
-                prompt_audio, _ = sf.read(voice_embedding)
-
-                # For voice cloning, we need context with the reference
-                # Use a generic prompt text since we don't have the original
-                context = [
-                    {
-                        "role": "0",
-                        "content": [
-                            {"type": "text", "text": ""},
-                            {"type": "audio", "path": prompt_audio}
-                        ]
-                    },
-                    {
-                        "role": "0",
-                        "content": [
-                            {"type": "text", "text": text}
-                        ]
-                    },
-                ]
-
-                inputs = self.processor.apply_chat_template(
-                    context,
-                    tokenize=True,
-                    return_dict=True,
-                )
-            else:
-                # Default voice mode - simple text input with speaker ID
-                # [0] is the default speaker
-                formatted_text = f"[0]{text}"
-                inputs = self.processor(
-                    formatted_text,
-                    add_special_tokens=True,
-                    return_tensors="pt"
-                )
-
-            # Move inputs to device
-            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
-                      for k, v in inputs.items()}
-
-            # Remove token_type_ids if present (not needed)
-            if "token_type_ids" in inputs:
-                inputs.pop("token_type_ids")
-
-            # Generate audio
-            with torch.no_grad():
-                audio = self.model.generate(**inputs, output_audio=True)
-
-            # Convert to numpy array
-            audio_np = audio[0].cpu().numpy()
-
-            # Ensure float32
-            if audio_np.dtype != np.float32:
-                audio_np = audio_np.astype(np.float32)
-
-            return audio_np
-
-        except Exception as e:
-            logger.error(f"Generation failed: {e}")
             raise
 
     async def extract_voice_embedding(
@@ -411,7 +326,7 @@ class StreamingSynthesizer:
         """
         Save reference audio for voice cloning.
 
-        Marvis uses audio file paths for voice cloning,
+        Chatterbox uses audio file paths for voice cloning,
         so we save the audio to a file and return the path.
 
         Args:
@@ -431,16 +346,12 @@ class StreamingSynthesizer:
             # Resample to model sample rate if needed
             target_sr = self.sample_rate
             if sample_rate != target_sr:
-                import torch
-                import torchaudio
-
-                audio_tensor = torch.from_numpy(reference_audio).float()
-                audio_tensor = torchaudio.functional.resample(
-                    audio_tensor,
-                    orig_freq=sample_rate,
-                    new_freq=target_sr
+                import librosa
+                reference_audio = librosa.resample(
+                    reference_audio,
+                    orig_sr=sample_rate,
+                    target_sr=target_sr
                 )
-                reference_audio = audio_tensor.numpy()
 
             # Save to temp file
             temp_file = tempfile.NamedTemporaryFile(suffix='.wav', delete=False)
@@ -463,8 +374,10 @@ class StreamingSynthesizer:
             stats['avg_latency'] = 0.0
             stats['avg_first_chunk'] = 0.0
 
-        stats['model'] = self.model_path
+        stats['chunk_size'] = self.chunk_size
+        stats['context_window'] = self.context_window
         stats['sample_rate'] = self.sample_rate
+        stats['use_compile'] = self.use_compile
 
         return stats
 
@@ -473,10 +386,6 @@ class StreamingSynthesizer:
         if self.model:
             del self.model
             self.model = None
-
-        if self.processor:
-            del self.processor
-            self.processor = None
 
         self.is_loaded = False
         self._warmup_done = False
