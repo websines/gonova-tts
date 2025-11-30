@@ -9,8 +9,8 @@ echo "Starting TTS service (Chatterbox-vLLM)..."
 cd "$(dirname "$0")/.."
 PROJECT_ROOT=$(pwd)
 
-# Set GPU (use GPU 0 for single GPU, or set CUDA_VISIBLE_DEVICES externally)
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+# Set GPU (use GPU 1 by default, or set CUDA_VISIBLE_DEVICES externally)
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
 # vLLM configuration
 export TTS_MAX_BATCH_SIZE=${TTS_MAX_BATCH_SIZE:-8}
