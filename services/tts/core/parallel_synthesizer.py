@@ -187,12 +187,13 @@ class ParallelSynthesizer:
         temperature: float = 0.8,
     ) -> AsyncGenerator[Tuple[np.ndarray, StreamingMetrics], None]:
         """
-        Stream audio generation with parallel processing.
+        Stream audio generation with pipelined processing.
 
-        1. Splits text into sentences
-        2. Batches all sentences to vLLM for parallel T3 generation
-        3. Processes S3Gen chunks in parallel
-        4. Yields audio chunks in order as they complete
+        Strategy for low TTFB:
+        1. Generate FIRST sentence T3 immediately
+        2. Start S3Gen on first sentence while batching remaining sentences
+        3. Yield first audio ASAP
+        4. Continue with remaining sentences
         """
         if not self.is_loaded:
             raise RuntimeError("Model not loaded. Call load_sync() first")
@@ -207,7 +208,7 @@ class ParallelSynthesizer:
             # Split text into sentences
             sentences = split_into_sentences(text)
             num_sentences = len(sentences)
-            print(f"[PARALLEL] Split into {num_sentences} sentences")
+            print(f"[PIPELINE] Split into {num_sentences} sentences")
 
             if num_sentences == 0:
                 return
@@ -216,86 +217,116 @@ class ParallelSynthesizer:
             s3gen_ref, cond_emb = self.tts.get_audio_conditionals(voice_embedding)
             cond_emb = self.tts.update_exaggeration(cond_emb, exaggeration)
 
-            # Batch generate ALL T3 tokens in parallel via vLLM
-            print(f"[PARALLEL] Starting batch T3 generation...")
-            t3_start = time.time()
-
             from vllm import SamplingParams
 
-            prompts = ["[START]" + punc_norm(s) + "[STOP]" for s in sentences]
-
-            batch_results = self.tts.t3.generate(
-                [
-                    {
-                        "prompt": p,
-                        "multi_modal_data": {"conditionals": [cond_emb]},
-                    }
-                    for p in prompts
-                ],
-                sampling_params=SamplingParams(
-                    temperature=temperature,
-                    stop_token_ids=[self.tts.t3_config.stop_speech_token + SPEECH_TOKEN_OFFSET],
-                    max_tokens=min(1000, self.max_model_len),
-                    top_p=0.8,
-                    repetition_penalty=2.0,
-                )
+            sampling_params = SamplingParams(
+                temperature=temperature,
+                stop_token_ids=[self.tts.t3_config.stop_speech_token + SPEECH_TOKEN_OFFSET],
+                max_tokens=min(1000, self.max_model_len),
+                top_p=0.8,
+                repetition_penalty=2.0,
             )
 
-            t3_time = time.time() - t3_start
-            print(f"[PARALLEL] T3 batch done in {t3_time:.2f}s for {num_sentences} sentences")
-
-            # Extract speech tokens for each sentence
-            all_speech_tokens = []
-            for batch_result in batch_results:
-                for output in batch_result.outputs:
-                    speech_tokens = torch.tensor(
-                        [token - SPEECH_TOKEN_OFFSET for token in output.token_ids],
-                        device="cuda"
-                    )
-                    speech_tokens = drop_invalid_tokens(speech_tokens)
-                    speech_tokens = speech_tokens[speech_tokens < 6561]
-                    all_speech_tokens.append(speech_tokens)
-
-            # Process S3Gen in parallel and yield results in order
-            print(f"[PARALLEL] Starting parallel S3Gen with {self.s3gen_workers} workers...")
-
-            # Submit all S3Gen jobs
-            loop = asyncio.get_event_loop()
-            futures = []
-            for idx, tokens in enumerate(all_speech_tokens):
-                future = loop.run_in_executor(
-                    self.executor,
-                    self._process_s3gen,
-                    tokens,
-                    s3gen_ref,
-                    idx,
-                )
-                futures.append(future)
-
-            # Collect results and yield in order
-            results = {}
             total_audio_duration = 0.0
-            next_to_yield = 0
+            loop = asyncio.get_event_loop()
 
-            for future in asyncio.as_completed(futures):
-                chunk_idx, audio, duration = await future
+            # STEP 1: Generate FIRST sentence T3 immediately (low TTFB)
+            print(f"[PIPELINE] Generating first sentence T3...")
+            first_prompt = "[START]" + punc_norm(sentences[0]) + "[STOP]"
 
-                if audio is not None:
-                    results[chunk_idx] = (audio, duration)
+            first_result = self.tts.t3.generate(
+                [{
+                    "prompt": first_prompt,
+                    "multi_modal_data": {"conditionals": [cond_emb]},
+                }],
+                sampling_params=sampling_params,
+            )
 
-                    # Yield chunks in order
-                    while next_to_yield in results:
-                        audio_chunk, audio_dur = results.pop(next_to_yield)
+            first_t3_time = time.time() - start_time
+            print(f"[PIPELINE] First T3 done in {first_t3_time:.2f}s")
 
-                        if metrics.chunk_count == 0:
-                            metrics.latency_to_first_chunk = time.time() - start_time
-                            print(f"[PARALLEL] TTFB: {metrics.latency_to_first_chunk*1000:.0f}ms")
+            # Extract first sentence tokens
+            first_tokens = torch.tensor(
+                [token - SPEECH_TOKEN_OFFSET for token in first_result[0].outputs[0].token_ids],
+                device="cuda"
+            )
+            first_tokens = drop_invalid_tokens(first_tokens)
+            first_tokens = first_tokens[first_tokens < 6561]
 
+            # STEP 2: Start S3Gen on first sentence AND batch remaining T3 concurrently
+            remaining_future = None
+            if num_sentences > 1:
+                print(f"[PIPELINE] Starting remaining {num_sentences - 1} sentences T3 in background...")
+                remaining_prompts = ["[START]" + punc_norm(s) + "[STOP]" for s in sentences[1:]]
+
+                # Run remaining T3 in background thread
+                def generate_remaining():
+                    return self.tts.t3.generate(
+                        [{
+                            "prompt": p,
+                            "multi_modal_data": {"conditionals": [cond_emb]},
+                        } for p in remaining_prompts],
+                        sampling_params=sampling_params,
+                    )
+
+                remaining_future = loop.run_in_executor(self.executor, generate_remaining)
+
+            # STEP 3: Process first sentence S3Gen and yield immediately
+            print(f"[PIPELINE] Processing first S3Gen...")
+            _, first_audio, first_duration = self._process_s3gen(first_tokens, s3gen_ref, 0)
+
+            if first_audio is not None:
+                metrics.latency_to_first_chunk = time.time() - start_time
+                metrics.chunk_count = 1
+                total_audio_duration += first_duration
+                print(f"[PIPELINE] TTFB: {metrics.latency_to_first_chunk*1000:.0f}ms")
+                yield first_audio, metrics
+
+            # STEP 4: Wait for remaining T3 and process S3Gen
+            if remaining_future is not None:
+                remaining_results = await remaining_future
+                print(f"[PIPELINE] Remaining T3 done, processing S3Gen...")
+
+                # Extract remaining tokens
+                remaining_tokens = []
+                for batch_result in remaining_results:
+                    for output in batch_result.outputs:
+                        tokens = torch.tensor(
+                            [token - SPEECH_TOKEN_OFFSET for token in output.token_ids],
+                            device="cuda"
+                        )
+                        tokens = drop_invalid_tokens(tokens)
+                        tokens = tokens[tokens < 6561]
+                        remaining_tokens.append(tokens)
+
+                # Process remaining S3Gen in parallel
+                futures = []
+                for idx, tokens in enumerate(remaining_tokens):
+                    future = loop.run_in_executor(
+                        self.executor,
+                        self._process_s3gen,
+                        tokens,
+                        s3gen_ref,
+                        idx + 1,  # offset by 1 since first is already done
+                    )
+                    futures.append((idx + 1, future))
+
+                # Yield in order as they complete
+                results = {}
+                next_to_yield = 1  # Start from 1, first already yielded
+
+                for idx, future in futures:
+                    chunk_idx, audio, duration = await future
+                    if audio is not None:
+                        results[chunk_idx] = (audio, duration)
+
+                # Yield remaining in order
+                for i in range(1, num_sentences):
+                    if i in results:
+                        audio_chunk, audio_dur = results[i]
                         metrics.chunk_count += 1
                         total_audio_duration += audio_dur
-
                         yield audio_chunk, metrics
-                        next_to_yield += 1
 
             # Final metrics
             metrics.total_generation_time = time.time() - start_time
@@ -308,18 +339,18 @@ class ParallelSynthesizer:
             if metrics.latency_to_first_chunk:
                 self.stats['first_chunk_latency'] += metrics.latency_to_first_chunk
 
-            print(f"\n[PARALLEL] ========== SUMMARY ==========")
-            print(f"[PARALLEL] Sentences: {num_sentences}")
-            print(f"[PARALLEL] T3 batch time: {t3_time:.2f}s")
-            print(f"[PARALLEL] Total time: {metrics.total_generation_time:.2f}s")
-            print(f"[PARALLEL] Audio duration: {total_audio_duration:.2f}s")
-            print(f"[PARALLEL] TTFB: {metrics.latency_to_first_chunk*1000:.0f}ms")
-            print(f"[PARALLEL] RTF: {metrics.rtf:.2f}")
-            print(f"[PARALLEL] ================================\n")
+            print(f"\n[PIPELINE] ========== SUMMARY ==========")
+            print(f"[PIPELINE] Sentences: {num_sentences}")
+            print(f"[PIPELINE] First T3: {first_t3_time:.2f}s")
+            print(f"[PIPELINE] Total time: {metrics.total_generation_time:.2f}s")
+            print(f"[PIPELINE] Audio duration: {total_audio_duration:.2f}s")
+            print(f"[PIPELINE] TTFB: {metrics.latency_to_first_chunk*1000:.0f}ms")
+            print(f"[PIPELINE] RTF: {metrics.rtf:.2f}")
+            print(f"[PIPELINE] ================================\n")
 
         except Exception as e:
             self.stats['errors'] += 1
-            logger.error(f"Parallel synthesis error: {e}")
+            logger.error(f"Pipeline synthesis error: {e}")
             raise
 
     async def synthesize_streaming(
