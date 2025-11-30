@@ -9,9 +9,9 @@ Real-time text-to-speech with:
 - Graceful shutdown
 - Rate limiting
 
-IMPORTANT: Do NOT import torch at module level - it initializes CUDA
-which forces vLLM to use spawn multiprocessing, breaking tokenizer registration.
-torch is imported lazily where needed (e.g., health check).
+IMPORTANT: All heavy imports must be inside if __name__ == "__main__" guard.
+When vLLM uses spawn multiprocessing, it re-imports this module in subprocesses.
+Module-level imports can interfere with chatterbox_vllm's tokenizer registration.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
 import structlog
@@ -28,12 +28,11 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
 import uvicorn
 
-# Add parent directory to path
-sys.path.insert(0, str(Path(__file__).parent))
-
-from core.synthesizer import StreamingSynthesizer
-from core.voice_manager import VoiceManager
-from core.queue_manager import TTSQueueManager, SynthesisRequest, AudioChunk
+# Type hints only - actual imports inside main guard
+if TYPE_CHECKING:
+    from core.synthesizer import StreamingSynthesizer
+    from core.voice_manager import VoiceManager
+    from core.queue_manager import TTSQueueManager
 
 # Setup logging
 structlog.configure(
@@ -45,293 +44,6 @@ structlog.configure(
 )
 
 logger = structlog.get_logger()
-
-
-class TTSService:
-    """
-    Main TTS service with all components integrated.
-
-    Uses Chatterbox-vLLM for high-performance inference (4-10x faster).
-    """
-
-    def __init__(
-        self,
-        model_path: Optional[str] = None,
-        device: str = "cuda",
-        device_index: int = 0,  # Use device 0 (controlled by CUDA_VISIBLE_DEVICES)
-        chunk_size: int = 50,
-        max_connections: int = 50,
-    ):
-        self.model_path = model_path
-        self.device = device
-        self.device_index = device_index
-        self.chunk_size = chunk_size
-        self.max_connections = max_connections
-
-        # Components - using vLLM-accelerated synthesizer
-        # chatterbox-vllm uses its own defaults (max_batch_size=10, max_model_len=1000)
-        self.synthesizer = StreamingSynthesizer(
-            model_path=model_path,
-            device=device,
-            device_index=device_index,
-            chunk_size=chunk_size,
-        )
-
-        self.voice_manager = VoiceManager(
-            cache_dir="./voices",
-            synthesizer=self.synthesizer,
-        )
-
-        self.queue_manager = TTSQueueManager()
-
-        # Connection tracking
-        self.connections = {}
-        self.active_connections = 0
-        self.rate_limiter = RateLimiter()
-
-        # Shutdown handling
-        self.is_shutting_down = False
-
-        logger.info(
-            "tts_service_initialized",
-            device=f"{device}:{device_index}",
-            chunk_size=chunk_size
-        )
-
-    def load_model_sync(self):
-        """
-        Load model synchronously in main thread.
-
-        MUST be called before starting the event loop - vLLM V1 engine
-        requires running in the main thread to avoid fallback to buggy V0 engine.
-        """
-        logger.info("loading_tts_model_sync")
-        self.synthesizer.load_sync()
-        logger.info("model_loaded")
-
-    async def _tts_worker(self):
-        """
-        Background worker: Process TTS queue.
-
-        Gets synthesis requests and generates audio.
-        """
-        logger.info("tts_worker_started")
-
-        while not self.is_shutting_down:
-            try:
-                # Get next synthesis request
-                request = await self.queue_manager.get_next_request()
-
-                if request is None:
-                    await asyncio.sleep(0.01)
-                    continue
-
-                # Get voice embedding
-                voice_embedding = None
-                if request.voice_id and request.voice_id != "default":
-                    voice_embedding = await self.voice_manager.get_voice(request.voice_id)
-
-                    if voice_embedding is None:
-                        logger.warning(
-                            "voice_not_found",
-                            connection_id=request.connection_id,
-                            voice_id=request.voice_id
-                        )
-                        # Use default voice
-                        voice_embedding = None
-
-                # Synthesize with streaming
-                chunk_id = 0
-                try:
-                    async for audio_chunk in self.synthesizer.synthesize_streaming(
-                        text=request.text,
-                        voice_embedding=voice_embedding,
-                        chunk_size=request.chunk_size,
-                        exaggeration=request.exaggeration,
-                    ):
-                        # Enqueue audio chunk
-                        await self.queue_manager.enqueue_audio_chunk(
-                            request.connection_id,
-                            audio_chunk.tobytes(),
-                            chunk_id,
-                            is_final=False
-                        )
-                        chunk_id += 1
-
-                    # Send final marker
-                    await self.queue_manager.enqueue_audio_chunk(
-                        request.connection_id,
-                        b'',
-                        chunk_id,
-                        is_final=True
-                    )
-
-                    logger.info(
-                        "synthesis_completed",
-                        connection_id=request.connection_id,
-                        text_length=len(request.text),
-                        chunks=chunk_id
-                    )
-
-                except Exception as e:
-                    logger.error(
-                        "synthesis_failed",
-                        connection_id=request.connection_id,
-                        error=str(e),
-                        exc_info=True
-                    )
-
-                # Mark request as done
-                await self.queue_manager.mark_request_done()
-
-            except Exception as e:
-                logger.error("tts_worker_error", error=str(e), exc_info=True)
-                await asyncio.sleep(1.0)
-
-    async def handle_connection(self, websocket: WebSocket, conn_id: str):
-        """Handle WebSocket connection"""
-
-        # Register connection
-        output_queue = self.queue_manager.register_connection(conn_id)
-
-        self.connections[conn_id] = {
-            'websocket': websocket,
-            'connected_at': time.time(),
-        }
-        self.active_connections += 1
-
-        logger.info(
-            "connection_established",
-            connection_id=conn_id,
-            active_connections=self.active_connections
-        )
-
-        try:
-            # Receiver task: WebSocket → Queue
-            async def receive_requests():
-                async for message in websocket.iter_text():
-                    try:
-                        import json
-                        data = json.loads(message)
-
-                        if data.get('type') == 'synthesize':
-                            # Enqueue synthesis request
-                            await self.queue_manager.enqueue_request(
-                                connection_id=conn_id,
-                                text=data.get('text', ''),
-                                voice_id=data.get('voice_id', 'default'),
-                                chunk_size=data.get('chunk_size', self.chunk_size),
-                                exaggeration=data.get('exaggeration', 0.5),
-                                streaming=data.get('streaming', True),
-                            )
-
-                        elif data.get('type') == 'register_voice':
-                            # Register new voice
-                            voice_id = data.get('voice_id')
-                            reference_audio = data.get('reference_audio')
-
-                            if voice_id and reference_audio:
-                                try:
-                                    await self.voice_manager.register_voice(
-                                        voice_id=voice_id,
-                                        reference_audio_b64=reference_audio,
-                                        description=data.get('description', '')
-                                    )
-
-                                    await websocket.send_json({
-                                        'type': 'voice_registered',
-                                        'voice_id': voice_id,
-                                    })
-
-                                except Exception as e:
-                                    await websocket.send_json({
-                                        'type': 'error',
-                                        'message': f"Voice registration failed: {e}"
-                                    })
-
-                        elif data.get('type') == 'list_voices':
-                            # List available voices
-                            voices = self.voice_manager.list_voices()
-                            await websocket.send_json({
-                                'type': 'voice_list',
-                                'voices': voices
-                            })
-
-                    except Exception as e:
-                        logger.error(
-                            "request_processing_error",
-                            connection_id=conn_id,
-                            error=str(e)
-                        )
-
-            # Sender task: Queue → WebSocket
-            async def send_audio():
-                while True:
-                    chunk = await output_queue.get()
-
-                    try:
-                        # Send audio chunk
-                        if not chunk.is_final:
-                            await websocket.send_bytes(chunk.audio_data)
-                        else:
-                            # Send completion marker
-                            await websocket.send_json({
-                                'type': 'synthesis_complete',
-                                'chunk_id': chunk.chunk_id
-                            })
-
-                    except WebSocketDisconnect:
-                        break
-                    except Exception as e:
-                        logger.error(
-                            "send_error",
-                            connection_id=conn_id,
-                            error=str(e)
-                        )
-                        break
-
-            # Run both tasks
-            await asyncio.gather(receive_requests(), send_audio())
-
-        except WebSocketDisconnect:
-            logger.info("connection_closed", connection_id=conn_id)
-
-        except Exception as e:
-            logger.error(
-                "connection_error",
-                connection_id=conn_id,
-                error=str(e),
-                exc_info=True
-            )
-
-        finally:
-            # Cleanup
-            self.queue_manager.unregister_connection(conn_id)
-            if conn_id in self.connections:
-                del self.connections[conn_id]
-            self.active_connections -= 1
-
-            logger.info(
-                "connection_cleaned_up",
-                connection_id=conn_id,
-                active_connections=self.active_connections
-            )
-
-    async def shutdown(self):
-        """Graceful shutdown"""
-        logger.info("shutting_down")
-        self.is_shutting_down = True
-
-        # Wait for queues to empty
-        await self.queue_manager.wait_until_empty(timeout=30.0)
-
-        # Stop workers
-        await self.queue_manager.stop()
-
-        # Cleanup synthesizer
-        await self.synthesizer.cleanup()
-
-        logger.info("shutdown_complete")
 
 
 class RateLimiter:
@@ -364,8 +76,8 @@ class RateLimiter:
 # Create FastAPI app
 app = FastAPI(title="TTS Service", version="0.1.0")
 
-# Global service instance
-service: Optional[TTSService] = None
+# Global service instance - set in main()
+service = None
 
 
 @app.on_event("startup")
@@ -463,12 +175,255 @@ async def metrics():
 if __name__ == "__main__":
     import os
 
-    # Get port from environment
+    # Add parent directory to path - MUST be before local imports
+    sys.path.insert(0, str(Path(__file__).parent))
+
+    # Import local modules ONLY inside main guard
+    # This prevents interference with vLLM's spawn multiprocessing
+    from core.synthesizer import StreamingSynthesizer
+    from core.voice_manager import VoiceManager
+    from core.queue_manager import TTSQueueManager, SynthesisRequest, AudioChunk
+
+    class TTSService:
+        """
+        Main TTS service with all components integrated.
+
+        Uses Chatterbox-vLLM for high-performance inference (4-10x faster).
+        """
+
+        def __init__(
+            self,
+            model_path: Optional[str] = None,
+            device: str = "cuda",
+            device_index: int = 0,
+            chunk_size: int = 50,
+            max_connections: int = 50,
+        ):
+            self.model_path = model_path
+            self.device = device
+            self.device_index = device_index
+            self.chunk_size = chunk_size
+            self.max_connections = max_connections
+
+            # Components
+            self.synthesizer = StreamingSynthesizer(
+                model_path=model_path,
+                device=device,
+                device_index=device_index,
+                chunk_size=chunk_size,
+            )
+
+            self.voice_manager = VoiceManager(
+                cache_dir="./voices",
+                synthesizer=self.synthesizer,
+            )
+
+            self.queue_manager = TTSQueueManager()
+
+            # Connection tracking
+            self.connections = {}
+            self.active_connections = 0
+            self.rate_limiter = RateLimiter()
+
+            # Shutdown handling
+            self.is_shutting_down = False
+
+            logger.info(
+                "tts_service_initialized",
+                device=f"{device}:{device_index}",
+                chunk_size=chunk_size
+            )
+
+        def load_model_sync(self):
+            """Load model synchronously in main thread."""
+            logger.info("loading_tts_model_sync")
+            self.synthesizer.load_sync()
+            logger.info("model_loaded")
+
+        async def _tts_worker(self):
+            """Background worker: Process TTS queue."""
+            logger.info("tts_worker_started")
+
+            while not self.is_shutting_down:
+                try:
+                    request = await self.queue_manager.get_next_request()
+
+                    if request is None:
+                        await asyncio.sleep(0.01)
+                        continue
+
+                    # Get voice embedding
+                    voice_embedding = None
+                    if request.voice_id and request.voice_id != "default":
+                        voice_embedding = await self.voice_manager.get_voice(request.voice_id)
+                        if voice_embedding is None:
+                            logger.warning(
+                                "voice_not_found",
+                                connection_id=request.connection_id,
+                                voice_id=request.voice_id
+                            )
+
+                    # Synthesize with streaming
+                    chunk_id = 0
+                    try:
+                        async for audio_chunk in self.synthesizer.synthesize_streaming(
+                            text=request.text,
+                            voice_embedding=voice_embedding,
+                            chunk_size=request.chunk_size,
+                            exaggeration=request.exaggeration,
+                        ):
+                            await self.queue_manager.enqueue_audio_chunk(
+                                request.connection_id,
+                                audio_chunk.tobytes(),
+                                chunk_id,
+                                is_final=False
+                            )
+                            chunk_id += 1
+
+                        # Send final marker
+                        await self.queue_manager.enqueue_audio_chunk(
+                            request.connection_id,
+                            b'',
+                            chunk_id,
+                            is_final=True
+                        )
+
+                        logger.info(
+                            "synthesis_completed",
+                            connection_id=request.connection_id,
+                            text_length=len(request.text),
+                            chunks=chunk_id
+                        )
+
+                    except Exception as e:
+                        logger.error(
+                            "synthesis_failed",
+                            connection_id=request.connection_id,
+                            error=str(e),
+                            exc_info=True
+                        )
+
+                    await self.queue_manager.mark_request_done()
+
+                except Exception as e:
+                    logger.error("tts_worker_error", error=str(e), exc_info=True)
+                    await asyncio.sleep(1.0)
+
+        async def handle_connection(self, websocket: WebSocket, conn_id: str):
+            """Handle WebSocket connection"""
+            output_queue = self.queue_manager.register_connection(conn_id)
+
+            self.connections[conn_id] = {
+                'websocket': websocket,
+                'connected_at': time.time(),
+            }
+            self.active_connections += 1
+
+            logger.info(
+                "connection_established",
+                connection_id=conn_id,
+                active_connections=self.active_connections
+            )
+
+            try:
+                async def receive_requests():
+                    async for message in websocket.iter_text():
+                        try:
+                            import json
+                            data = json.loads(message)
+
+                            if data.get('type') == 'synthesize':
+                                await self.queue_manager.enqueue_request(
+                                    connection_id=conn_id,
+                                    text=data.get('text', ''),
+                                    voice_id=data.get('voice_id', 'default'),
+                                    chunk_size=data.get('chunk_size', self.chunk_size),
+                                    exaggeration=data.get('exaggeration', 0.5),
+                                    streaming=data.get('streaming', True),
+                                )
+
+                            elif data.get('type') == 'register_voice':
+                                voice_id = data.get('voice_id')
+                                reference_audio = data.get('reference_audio')
+
+                                if voice_id and reference_audio:
+                                    try:
+                                        await self.voice_manager.register_voice(
+                                            voice_id=voice_id,
+                                            reference_audio_b64=reference_audio,
+                                            description=data.get('description', '')
+                                        )
+                                        await websocket.send_json({
+                                            'type': 'voice_registered',
+                                            'voice_id': voice_id,
+                                        })
+                                    except Exception as e:
+                                        await websocket.send_json({
+                                            'type': 'error',
+                                            'message': f"Voice registration failed: {e}"
+                                        })
+
+                            elif data.get('type') == 'list_voices':
+                                voices = self.voice_manager.list_voices()
+                                await websocket.send_json({
+                                    'type': 'voice_list',
+                                    'voices': voices
+                                })
+
+                        except Exception as e:
+                            logger.error(
+                                "request_processing_error",
+                                connection_id=conn_id,
+                                error=str(e)
+                            )
+
+                async def send_audio():
+                    while True:
+                        chunk = await output_queue.get()
+                        try:
+                            if not chunk.is_final:
+                                await websocket.send_bytes(chunk.audio_data)
+                            else:
+                                await websocket.send_json({
+                                    'type': 'synthesis_complete',
+                                    'chunk_id': chunk.chunk_id
+                                })
+                        except WebSocketDisconnect:
+                            break
+                        except Exception as e:
+                            logger.error("send_error", connection_id=conn_id, error=str(e))
+                            break
+
+                await asyncio.gather(receive_requests(), send_audio())
+
+            except WebSocketDisconnect:
+                logger.info("connection_closed", connection_id=conn_id)
+            except Exception as e:
+                logger.error("connection_error", connection_id=conn_id, error=str(e), exc_info=True)
+            finally:
+                self.queue_manager.unregister_connection(conn_id)
+                if conn_id in self.connections:
+                    del self.connections[conn_id]
+                self.active_connections -= 1
+                logger.info(
+                    "connection_cleaned_up",
+                    connection_id=conn_id,
+                    active_connections=self.active_connections
+                )
+
+        async def shutdown(self):
+            """Graceful shutdown"""
+            logger.info("shutting_down")
+            self.is_shutting_down = True
+            await self.queue_manager.wait_until_empty(timeout=30.0)
+            await self.queue_manager.stop()
+            await self.synthesizer.cleanup()
+            logger.info("shutdown_complete")
+
+    # Get configuration from environment
     port = int(os.getenv("TTS_PORT", "8002"))
     instance_id = os.getenv("TTS_INSTANCE_ID", "1")
-
-    # When CUDA_VISIBLE_DEVICES is set, always use device 0
-    device_index = 0
+    device_index = 0  # CUDA_VISIBLE_DEVICES controls which GPU
     max_connections = int(os.getenv("TTS_MAX_CONNECTIONS", "50"))
 
     logger.info(
@@ -480,7 +435,7 @@ if __name__ == "__main__":
 
     # Create service instance
     service = TTSService(
-        model_path=None,  # Uses HuggingFace pretrained model
+        model_path=None,
         device="cuda",
         device_index=device_index,
         chunk_size=50,
@@ -488,11 +443,10 @@ if __name__ == "__main__":
     )
 
     # Load model SYNCHRONOUSLY in main thread BEFORE starting uvicorn
-    # This is CRITICAL - vLLM V1 engine doesn't work in background threads
     logger.info("loading_model_in_main_thread")
     service.load_model_sync()
 
-    # Now start the server (startup event will start workers)
+    # Now start the server
     uvicorn.run(
         app,
         host="0.0.0.0",
