@@ -231,7 +231,7 @@ class StreamingSynthesizer:
             self.ve = self.ve.to(device=self.device).eval()
 
             # Load S3Gen
-            self.s3gen = S3Gen(use_fp16=True)  # Enable FP16 for faster inference
+            self.s3gen = S3Gen(use_fp16=False)  # FP16 causes dtype mismatch
             self.s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
             self.s3gen = self.s3gen.to(device=self.device).eval()
 
