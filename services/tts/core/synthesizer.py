@@ -88,8 +88,8 @@ class StreamingSynthesizer:
     pip install transformers torch soundfile huggingface_hub
     """
 
-    # Default model ID
-    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.2-transformers"
+    # Default model ID - use v0.1 which has better documented PyTorch support
+    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.1-transformers"
 
     def __init__(
         self,
@@ -345,7 +345,11 @@ class StreamingSynthesizer:
             # Generate audio
             print("[TTS] Starting model.generate()...")
             with torch.no_grad():
-                audio = self.model.generate(input_ids=input_ids, output_audio=True)
+                audio = self.model.generate(
+                    input_ids=input_ids,
+                    output_audio=True,
+                    max_new_tokens=1024,  # Limit generation length
+                )
             print(f"[TTS] Generation complete, audio type: {type(audio)}")
 
             # Convert to numpy array
