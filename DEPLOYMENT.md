@@ -87,15 +87,49 @@ GET /health
 curl http://localhost:8002/health
 ```
 
+## Server Modes
+
+### Batch Mode (Default)
+
+High throughput, higher latency. Best for offline processing.
+
+```bash
+./scripts/start_tts.sh
+```
+
+- **TTFB**: 5-10+ seconds (processes all sentences before streaming)
+- **Throughput**: 4-10x faster than realtime
+- **Use case**: Batch audio generation, pre-rendering
+
+### Streaming Mode (Low Latency)
+
+Token-level streaming for real-time applications.
+
+```bash
+./scripts/start_streaming_tts.sh
+```
+
+- **TTFB**: ~1-2 seconds (streams after 25 tokens)
+- **Throughput**: Slightly lower than batch mode
+- **Use case**: Voice agents, real-time TTS
+
+Streaming mode environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TTS_CHUNK_SIZE` | `25` | Tokens per audio chunk |
+| `TTS_CONTEXT_WINDOW` | `50` | Context tokens for S3Gen coherence |
+
 ## Performance
 
 RTX 3090 benchmarks:
 
-| Metric | Value |
-|--------|-------|
-| 40 min audio generation | ~87 seconds |
-| Batch throughput | 4-10x vs standard Chatterbox |
-| Sample rate | 24kHz |
+| Metric | Batch Mode | Streaming Mode |
+|--------|------------|----------------|
+| TTFB | 5-10+ sec | ~1-2 sec |
+| 40 min audio | ~87 sec | ~100 sec |
+| RTF | 0.04x | 0.3-0.5x |
+| Sample rate | 24kHz | 24kHz |
 
 ## Systemd Service
 
@@ -214,16 +248,19 @@ TTS_PORT=8003 ./scripts/start_tts.sh
 ```
 voice-agent/
 ├── services/tts/
-│   ├── server.py           # FastAPI + WebSocket server
-│   ├── config.yaml         # Service config
+│   ├── run_server.py              # Batch mode entry point
+│   ├── run_streaming_server.py    # Streaming mode entry point
+│   ├── server.py                  # FastAPI + WebSocket server
 │   └── core/
-│       ├── synthesizer.py  # Chatterbox-vLLM wrapper
+│       ├── synthesizer.py         # Batch synthesizer (sentences)
+│       ├── streaming_synthesizer.py  # Streaming synthesizer (tokens)
 │       ├── voice_manager.py
 │       └── queue_manager.py
 ├── scripts/
-│   ├── start_tts.sh        # Start script
-│   └── install_vllm.sh     # Installation script
-├── t3-model/               # vLLM model config (auto-created)
-├── voices/                 # Cached voice embeddings
-└── logs/                   # Service logs
+│   ├── start_tts.sh               # Start batch mode
+│   ├── start_streaming_tts.sh     # Start streaming mode
+│   └── test_tts_realtime.py       # Benchmark client
+├── t3-model/                      # vLLM model config (auto-created)
+├── voices/                        # Cached voice embeddings
+└── logs/                          # Service logs
 ```
