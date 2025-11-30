@@ -1,38 +1,33 @@
 #!/bin/bash
-# Start TTS service with Chatterbox-vLLM (high-performance)
+# Start TTS Server with Marvis TTS
+#
+# Uses Marvis-AI/marvis-tts-250m-v0.2-transformers for fast inference.
+# Supports sentence-level streaming and voice cloning.
+#
+# Environment variables:
+#   TTS_PORT - Server port (default: 8002)
+#   TTS_MAX_CONNECTIONS - Max WebSocket connections (default: 50)
+#   CUDA_VISIBLE_DEVICES - GPU index (default: 0)
 
 set -e
 
-echo "Starting TTS service (Chatterbox-vLLM)..."
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 
-# Go to project root (chatterbox-vllm needs t3-model/ in cwd)
-cd "$(dirname "$0")/.."
-PROJECT_ROOT=$(pwd)
+cd "$PROJECT_ROOT"
 
-# Set GPU (use GPU 1 by default, or set CUDA_VISIBLE_DEVICES externally)
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
-
-# Configuration (chatterbox-vllm uses its own defaults for batch_size=10, model_len=1000)
-export TTS_MAX_CONNECTIONS=${TTS_MAX_CONNECTIONS:-50}
-
-echo "Configuration:"
-echo "  GPU: $CUDA_VISIBLE_DEVICES"
-echo "  Max Connections: $TTS_MAX_CONNECTIONS"
-echo "  Working Dir: $PROJECT_ROOT"
-
-# Add CUDA libraries to LD_LIBRARY_PATH
-CUDA_LIBS=$(python -c "import torch; import os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || echo "")
-if [ -n "$CUDA_LIBS" ]; then
-    export LD_LIBRARY_PATH="$CUDA_LIBS:$LD_LIBRARY_PATH"
-fi
+# Default to GPU 0 if not set
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 # Create required directories
-mkdir -p logs
-mkdir -p voices
-mkdir -p t3-model
-mkdir -p t3-model-multilingual
+mkdir -p voices logs
 
-# Start server from project root (so t3-model/ is accessible)
+echo "Starting Marvis TTS Server..."
+echo "  Model: Marvis-AI/marvis-tts-250m-v0.2-transformers"
+echo "  Port: ${TTS_PORT:-8002}"
+echo "  Max connections: ${TTS_MAX_CONNECTIONS:-50}"
+echo "  GPU: $CUDA_VISIBLE_DEVICES"
 echo ""
-echo "Starting server..."
-uv run python services/tts/server.py 2>&1 | tee logs/tts.log
+
+# Run the server
+exec python services/tts/server.py 2>&1 | tee -a logs/tts.log

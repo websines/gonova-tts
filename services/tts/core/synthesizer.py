@@ -178,12 +178,16 @@ class StreamingSynthesizer:
 
             # Warmup with a simple generation
             logger.info("Warming up Marvis TTS...")
-            warmup_text = "[0]Hello, this is a warmup test."
-            inputs = self.processor(
-                warmup_text,
-                add_special_tokens=True,
-                return_tensors="pt"
-            ).to(self.model.device)
+            warmup_context = [
+                {"role": "0", "content": [{"type": "text", "text": "Hello."}]}
+            ]
+            inputs = self.processor.apply_chat_template(
+                warmup_context,
+                tokenize=True,
+                return_dict=True,
+            )
+            inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
+                      for k, v in inputs.items()}
             if "token_type_ids" in inputs:
                 inputs.pop("token_type_ids")
 
@@ -342,11 +346,9 @@ class StreamingSynthesizer:
 
         try:
             if voice_embedding:
-                # Voice cloning mode - use chat template with context
+                # Voice cloning mode - use chat template with reference audio
                 prompt_audio, _ = sf.read(voice_embedding)
 
-                # For voice cloning, we need context with the reference
-                # Use a generic prompt text since we don't have the original
                 context = [
                     {
                         "role": "0",
@@ -362,21 +364,23 @@ class StreamingSynthesizer:
                         ]
                     },
                 ]
-
-                inputs = self.processor.apply_chat_template(
-                    context,
-                    tokenize=True,
-                    return_dict=True,
-                )
             else:
-                # Default voice mode - simple text input with speaker ID
-                # [0] is the default speaker
-                formatted_text = f"[0]{text}"
-                inputs = self.processor(
-                    formatted_text,
-                    add_special_tokens=True,
-                    return_tensors="pt"
-                )
+                # Default voice mode - use chat template with just text
+                context = [
+                    {
+                        "role": "0",
+                        "content": [
+                            {"type": "text", "text": text}
+                        ]
+                    },
+                ]
+
+            # Apply chat template for proper formatting
+            inputs = self.processor.apply_chat_template(
+                context,
+                tokenize=True,
+                return_dict=True,
+            )
 
             # Move inputs to device
             inputs = {k: v.to(self.model.device) if hasattr(v, 'to') else v
