@@ -14,9 +14,9 @@ dependencies = [
     "python-multipart>=0.0.9",
 
     # TTS - Chatterbox-vLLM (high-performance vLLM-based inference)
-    # Install from git to get tokenizer.json included
-    # Requires: Linux/WSL2 with NVIDIA GPU, vLLM 0.10.0
-    "chatterbox-vllm @ git+https://github.com/randombk/chatterbox-vllm.git",
+    # Pinned to commit that uses vLLM 0.9.2 (newer commits use 0.10.0 which has flash_attn issues)
+    # Requires: Linux/WSL2 with NVIDIA GPU
+    "chatterbox-vllm @ git+https://github.com/randombk/chatterbox-vllm.git@38da9e36771711d6a9886463a41127c08132e2de",
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",
