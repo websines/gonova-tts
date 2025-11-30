@@ -14,21 +14,9 @@ dependencies = [
     "python-multipart>=0.0.9",
 
     # TTS - Chatterbox-vLLM (high-performance vLLM-based inference)
-    # Install from git to ensure tokenizer.json is included
-    # Requires: Linux/WSL2 with NVIDIA GPU
+    # Install from git to get tokenizer.json included
+    # Requires: Linux/WSL2 with NVIDIA GPU, vLLM 0.10.0
     "chatterbox-vllm @ git+https://github.com/randombk/chatterbox-vllm.git",
-
-    # vLLM dependencies (pinned for compatibility with chatterbox-vllm 0.2.1)
-    "vllm==0.9.2",
-    "transformers",
-    "tokenizers",
-    "librosa",
-    "s3tokenizer",
-    "omegaconf",
-    "conformer",
-    "diffusers",
-    "peft",
-    "llvmlite>=0.44.0",
 
     # PyTorch (CUDA version recommended)
     "torch>=2.0.0",

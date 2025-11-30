@@ -141,22 +141,15 @@ nvidia-smi
 
 ### CUDA assertion errors / "srcIndex < srcSelectDimSize"
 
-This is caused by a vLLM version mismatch. chatterbox-vllm requires exactly vLLM 0.9.2.
+This can be caused by:
+1. **Large max_model_len** - The model config uses 131072 tokens which causes OOM during profiling. Our code sets `max_model_len=1000` to fix this.
+2. **vLLM version mismatch** - chatterbox-vllm (git master) requires vLLM 0.10.0.
 
-**Fix:** Recreate your venv and reinstall:
-
-```bash
-rm -rf .venv
-python -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Or just reinstall vLLM:
+**Fix:** Reinstall from git:
 
 ```bash
-pip uninstall vllm -y
-pip install vllm==0.9.2
+pip uninstall chatterbox-vllm vllm -y
+pip install "chatterbox-vllm @ git+https://github.com/randombk/chatterbox-vllm.git"
 ```
 
 ### "t3-model/config.json not found"
