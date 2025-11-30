@@ -214,13 +214,14 @@ class StreamingSynthesizer:
             logger.info(f"Allocating {vllm_memory_percent * 100:.1f}% GPU memory to vLLM")
 
             # Initialize vLLM AsyncLLM engine
+            # NOTE: enforce_eager=False enables CUDA graphs for ~2-4x faster token generation
             engine_args = AsyncEngineArgs(
                 model="./t3-model",
                 task="generate",
                 tokenizer="EnTokenizer",
                 tokenizer_mode="custom",
                 gpu_memory_utilization=vllm_memory_percent,
-                enforce_eager=True,  # More stable for streaming
+                enforce_eager=False,  # Enable CUDA graphs for speed
                 max_model_len=self.max_model_len,
             )
             self.engine = AsyncLLM.from_engine_args(engine_args)
@@ -475,7 +476,7 @@ class StreamingSynthesizer:
                             now = time.time()
                             if first_token_time is None:
                                 first_token_time = now - start_time
-                                logger.info(f"First token in {first_token_time*1000:.0f}ms")
+                                print(f"[PROFILE] First token in {first_token_time*1000:.0f}ms")
                             token_times.append(now)
 
                 # Process chunk when buffer is full
@@ -489,7 +490,7 @@ class StreamingSynthesizer:
                     )
                     s3gen_time = time.time() - s3gen_start
                     s3gen_times.append(s3gen_time)
-                    logger.info(f"S3Gen chunk took {s3gen_time*1000:.0f}ms")
+                    print(f"[PROFILE] S3Gen chunk {len(s3gen_times)} took {s3gen_time*1000:.0f}ms")
 
                     if audio_chunk is not None:
                         # Update metrics
@@ -543,11 +544,12 @@ class StreamingSynthesizer:
                 token_gen_time = token_times[-1] - token_times[0]
                 tok_per_sec = (total_tokens - 1) / token_gen_time
                 avg_s3gen = sum(s3gen_times) / len(s3gen_times) if s3gen_times else 0
-                logger.info(
-                    f"T3 speed: {tok_per_sec:.1f} tok/s, "
-                    f"Avg S3Gen: {avg_s3gen*1000:.0f}ms/chunk, "
-                    f"First token: {first_token_time*1000:.0f}ms"
-                )
+                print(f"\n[PROFILE] ========== SUMMARY ==========")
+                print(f"[PROFILE] Total tokens: {total_tokens}")
+                print(f"[PROFILE] T3 speed: {tok_per_sec:.1f} tok/s")
+                print(f"[PROFILE] Avg S3Gen: {avg_s3gen*1000:.0f}ms/chunk")
+                print(f"[PROFILE] First token: {first_token_time*1000:.0f}ms")
+                print(f"[PROFILE] ================================\n")
 
             logger.info(
                 f"Streamed {metrics.chunk_count} chunks in {metrics.total_generation_time:.2f}s, "
