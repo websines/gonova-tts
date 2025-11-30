@@ -214,14 +214,13 @@ class StreamingSynthesizer:
             logger.info(f"Allocating {vllm_memory_percent * 100:.1f}% GPU memory to vLLM")
 
             # Initialize vLLM AsyncLLM engine
-            # NOTE: enforce_eager=False enables CUDA graphs for ~2-4x faster token generation
             engine_args = AsyncEngineArgs(
                 model="./t3-model",
                 task="generate",
                 tokenizer="EnTokenizer",
                 tokenizer_mode="custom",
                 gpu_memory_utilization=vllm_memory_percent,
-                enforce_eager=False,  # Enable CUDA graphs for speed
+                enforce_eager=True,  # CUDA graphs cause audio issues
                 max_model_len=self.max_model_len,
             )
             self.engine = AsyncLLM.from_engine_args(engine_args)
@@ -232,7 +231,7 @@ class StreamingSynthesizer:
             self.ve = self.ve.to(device=self.device).eval()
 
             # Load S3Gen
-            self.s3gen = S3Gen(use_fp16=False)
+            self.s3gen = S3Gen(use_fp16=True)  # Enable FP16 for faster inference
             self.s3gen.load_state_dict(load_file(ckpt_dir / "s3gen.safetensors"), strict=False)
             self.s3gen = self.s3gen.to(device=self.device).eval()
 
@@ -361,7 +360,7 @@ class StreamingSynthesizer:
             wav, _ = self.s3gen.inference(
                 speech_tokens=clean_tokens,
                 ref_dict=s3gen_ref,
-                n_timesteps=5,  # Reduced from 10 for faster streaming
+                n_timesteps=3,  # Aggressive reduction for streaming (was 10, then 5)
             )
 
         wav = wav.squeeze(0).detach().cpu().numpy()
