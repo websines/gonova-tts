@@ -171,12 +171,18 @@ class StreamingSynthesizer:
 
             # Load model using from_pretrained (downloads from HuggingFace)
             # This also initializes the vLLM engine
-            # max_model_len=1000 prevents CUDA assertion errors during profiling
+            # Settings based on chatterbox-vllm README for RTX 3090:
+            # - gpu_memory_utilization: give vLLM enough memory for KV cache
+            # - max_model_len: limit context to prevent OOM during profiling
+            # - max_num_seqs: set to 1 for multi-modal model safety
+            # - CUDA graphs enabled by default for performance
             loop = asyncio.get_event_loop()
             self.model = await loop.run_in_executor(
                 _executor,
                 lambda: ChatterboxTTS.from_pretrained(
+                    gpu_memory_utilization=0.5,
                     max_model_len=1000,
+                    max_num_seqs=1,
                 )
             )
 
