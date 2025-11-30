@@ -65,7 +65,7 @@ class StreamingSynthesizer:
 
         # Optimization settings
         self.context_window = 25  # Reduced from 50 for speed
-        self.use_compile = True   # Enable torch.compile
+        self.use_compile = False  # Disabled - causes CUDA graph issues with streaming
 
         # Stats
         self.stats = {
