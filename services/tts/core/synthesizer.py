@@ -112,13 +112,7 @@ class StreamingSynthesizer:
             # Load model
             self.model = ChatterboxTTS.from_pretrained(device=device_str)
 
-            # Convert to FP16 for faster inference
-            if "cuda" in device_str:
-                self.model.t3 = self.model.t3.half()
-                self.model.s3gen = self.model.s3gen.half()
-                logger.info("Model converted to FP16")
-
-            # Enable CUDA optimizations
+            # Enable CUDA optimizations (keep FP32 - FP16 causes dtype mismatch with conds)
             if "cuda" in device_str:
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
