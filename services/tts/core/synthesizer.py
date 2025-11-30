@@ -88,8 +88,8 @@ class StreamingSynthesizer:
     pip install transformers torch soundfile huggingface_hub
     """
 
-    # Default model ID - use v0.1 which has better documented PyTorch support
-    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.1-transformers"
+    # Default model ID
+    MODEL_ID = "Marvis-AI/marvis-tts-250m-v0.2-transformers"
 
     def __init__(
         self,
@@ -174,10 +174,15 @@ class StreamingSynthesizer:
                 torch.backends.cudnn.benchmark = True
                 torch.backends.cuda.matmul.allow_tf32 = True
                 torch.backends.cudnn.allow_tf32 = True
-                logger.info("CUDA optimizations enabled")
 
-            # Skip warmup for faster startup - first request will be slower
-            # Warmup was causing hangs with some model versions
+                # Compile model for faster inference (PyTorch 2.0+)
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    logger.info("Model compiled with torch.compile")
+                except Exception as e:
+                    logger.warning(f"torch.compile failed, using eager mode: {e}")
+
+                logger.info("CUDA optimizations enabled")
 
             self._warmup_done = True
             load_time = time.time() - start_time
@@ -348,7 +353,7 @@ class StreamingSynthesizer:
                 audio = self.model.generate(
                     input_ids=input_ids,
                     output_audio=True,
-                    max_new_tokens=1024,  # Limit generation length
+                    max_new_tokens=256,  # ~10 seconds of audio
                 )
             print(f"[TTS] Generation complete, audio type: {type(audio)}")
 
