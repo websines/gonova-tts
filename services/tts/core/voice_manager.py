@@ -9,6 +9,8 @@ Handles:
 
 import logging
 import base64
+import re
+import tempfile
 import torch
 import soundfile as sf
 import numpy as np
@@ -17,6 +19,19 @@ from typing import Optional, Dict
 import asyncio
 
 logger = logging.getLogger(__name__)
+
+
+def sanitize_voice_id(voice_id: str) -> str:
+    """
+    Sanitize voice_id to prevent path traversal attacks.
+
+    Only allows alphanumeric characters, underscores, and hyphens.
+    """
+    # Remove any path separators and dangerous characters
+    sanitized = re.sub(r'[^a-zA-Z0-9_-]', '', voice_id)
+    if not sanitized:
+        raise ValueError("Invalid voice_id: must contain alphanumeric characters")
+    return sanitized[:64]  # Limit length
 
 
 class VoiceManager:
@@ -76,48 +91,60 @@ class VoiceManager:
             str: Path to saved reference audio
 
         Raises:
-            ValueError: If audio quality is insufficient
+            ValueError: If audio quality is insufficient or voice_id is invalid
         """
+        # Sanitize voice_id to prevent path traversal
+        safe_voice_id = sanitize_voice_id(voice_id)
+
         try:
             # Decode base64 audio
             audio_bytes = base64.b64decode(reference_audio_b64)
 
-            # Load audio to validate
-            temp_path = f"/tmp/{voice_id}_temp.wav"
-            with open(temp_path, 'wb') as f:
-                f.write(audio_bytes)
+            # Use secure temp file
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                temp_path = temp_file.name
+                temp_file.write(audio_bytes)
 
-            # Load audio for validation
-            audio, sr = sf.read(temp_path)
+            try:
+                # Load audio for validation
+                audio, sr = sf.read(temp_path)
 
-            # Validate audio quality
-            validation = self._validate_reference_audio(audio, sr)
-            if not validation['valid']:
-                raise ValueError(f"Invalid reference audio: {validation['reason']}")
+                # Validate audio quality
+                validation = self._validate_reference_audio(audio, sr)
+                if not validation['valid']:
+                    raise ValueError(f"Invalid reference audio: {validation['reason']}")
 
-            # Save permanently to voices directory
-            voice_path = self.cache_dir / f"{voice_id}.wav"
-            with open(voice_path, 'wb') as f:
-                f.write(audio_bytes)
+                # Save permanently to voices directory
+                voice_path = self.cache_dir / f"{safe_voice_id}.wav"
+                with open(voice_path, 'wb') as f:
+                    f.write(audio_bytes)
 
-            # Store metadata
-            self.voice_cache[voice_id] = str(voice_path)  # Store path, not embedding
-            self.voice_metadata[voice_id] = {
-                'description': description,
-                'duration': len(audio) / sr,
-                'sample_rate': sr,
-                'path': str(voice_path),
-                'created_at': asyncio.get_event_loop().time(),
-            }
+                # Store metadata
+                self.voice_cache[safe_voice_id] = str(voice_path)
+                self.voice_metadata[safe_voice_id] = {
+                    'description': description,
+                    'duration': len(audio) / sr,
+                    'sample_rate': sr,
+                    'path': str(voice_path),
+                    'created_at': asyncio.get_event_loop().time(),
+                }
 
-            # Cleanup LRU if cache too large
-            if len(self.voice_cache) > self.max_cached:
-                self._cleanup_cache()
+                # Cleanup LRU if cache too large
+                if len(self.voice_cache) > self.max_cached:
+                    self._cleanup_cache()
 
-            self.stats['registrations'] += 1
+                self.stats['registrations'] += 1
 
-            logger.info(f"Voice {voice_id} registered at {voice_path}")
-            return str(voice_path)
+                logger.info(f"Voice {safe_voice_id} registered at {voice_path}")
+                return str(voice_path)
+
+            finally:
+                # Clean up temp file
+                import os
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
 
         except Exception as e:
             logger.error(f"Voice registration failed: {e}")

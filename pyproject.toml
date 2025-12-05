@@ -25,6 +25,9 @@ dependencies = [
     "scipy>=1.11.0",
     "soundfile>=0.12.0",
 
+    # NLP for sentence segmentation
+    "spacy>=3.7.0",
+
     # Utilities
     "pydantic>=2.5.0",
     "pydantic-settings>=2.1.0",

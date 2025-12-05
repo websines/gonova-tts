@@ -170,16 +170,24 @@ class TTSQueueManager:
             self.metrics['requests_dropped'] += 1
             return False
 
-    async def get_next_request(self) -> Optional[SynthesisRequest]:
+    async def get_next_request(self, timeout: float = 1.0) -> Optional[SynthesisRequest]:
         """
         Get next synthesis request for processing.
 
+        Args:
+            timeout: Max time to wait for a request (allows checking shutdown)
+
         Returns:
-            SynthesisRequest or None if queue is empty
+            SynthesisRequest or None if queue is empty or timeout
         """
         try:
-            request = await self.input_queue.get()
+            request = await asyncio.wait_for(
+                self.input_queue.get(),
+                timeout=timeout
+            )
             return request
+        except asyncio.TimeoutError:
+            return None
         except Exception as e:
             logger.error(f"Error getting request: {e}")
             return None

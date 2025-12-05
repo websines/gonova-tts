@@ -117,11 +117,10 @@ class TTSService:
 
         while not self.is_shutting_down:
             try:
-                # Get next synthesis request
+                # Get next synthesis request (timeout allows checking shutdown)
                 request = await self.queue_manager.get_next_request()
 
                 if request is None:
-                    await asyncio.sleep(0.01)
                     continue
 
                 # Get voice embedding
@@ -207,89 +206,113 @@ class TTSService:
         try:
             # Receiver task: WebSocket → Queue
             async def receive_requests():
-                async for message in websocket.iter_text():
-                    try:
-                        import json
-                        data = json.loads(message)
+                try:
+                    async for message in websocket.iter_text():
+                        try:
+                            import json
+                            data = json.loads(message)
 
-                        if data.get('type') == 'synthesize':
-                            # Enqueue synthesis request
-                            await self.queue_manager.enqueue_request(
+                            if data.get('type') == 'synthesize':
+                                # Enqueue synthesis request
+                                await self.queue_manager.enqueue_request(
+                                    connection_id=conn_id,
+                                    text=data.get('text', ''),
+                                    voice_id=data.get('voice_id', 'default'),
+                                    chunk_size=data.get('chunk_size', self.chunk_size),
+                                    exaggeration=data.get('exaggeration', 0.5),
+                                    streaming=data.get('streaming', True),
+                                )
+
+                            elif data.get('type') == 'register_voice':
+                                # Register new voice
+                                voice_id = data.get('voice_id')
+                                reference_audio = data.get('reference_audio')
+
+                                if voice_id and reference_audio:
+                                    try:
+                                        await self.voice_manager.register_voice(
+                                            voice_id=voice_id,
+                                            reference_audio_b64=reference_audio,
+                                            description=data.get('description', '')
+                                        )
+
+                                        await websocket.send_json({
+                                            'type': 'voice_registered',
+                                            'voice_id': voice_id,
+                                        })
+
+                                    except Exception as e:
+                                        await websocket.send_json({
+                                            'type': 'error',
+                                            'message': f"Voice registration failed: {e}"
+                                        })
+
+                            elif data.get('type') == 'list_voices':
+                                # List available voices
+                                voices = self.voice_manager.list_voices()
+                                await websocket.send_json({
+                                    'type': 'voice_list',
+                                    'voices': voices
+                                })
+
+                        except Exception as e:
+                            logger.error(
+                                "request_processing_error",
                                 connection_id=conn_id,
-                                text=data.get('text', ''),
-                                voice_id=data.get('voice_id', 'default'),
-                                chunk_size=data.get('chunk_size', self.chunk_size),
-                                exaggeration=data.get('exaggeration', 0.5),
-                                streaming=data.get('streaming', True),
+                                error=str(e)
                             )
-
-                        elif data.get('type') == 'register_voice':
-                            # Register new voice
-                            voice_id = data.get('voice_id')
-                            reference_audio = data.get('reference_audio')
-
-                            if voice_id and reference_audio:
-                                try:
-                                    await self.voice_manager.register_voice(
-                                        voice_id=voice_id,
-                                        reference_audio_b64=reference_audio,
-                                        description=data.get('description', '')
-                                    )
-
-                                    await websocket.send_json({
-                                        'type': 'voice_registered',
-                                        'voice_id': voice_id,
-                                    })
-
-                                except Exception as e:
-                                    await websocket.send_json({
-                                        'type': 'error',
-                                        'message': f"Voice registration failed: {e}"
-                                    })
-
-                        elif data.get('type') == 'list_voices':
-                            # List available voices
-                            voices = self.voice_manager.list_voices()
-                            await websocket.send_json({
-                                'type': 'voice_list',
-                                'voices': voices
-                            })
-
-                    except Exception as e:
-                        logger.error(
-                            "request_processing_error",
-                            connection_id=conn_id,
-                            error=str(e)
-                        )
+                except asyncio.CancelledError:
+                    pass
 
             # Sender task: Queue → WebSocket
             async def send_audio():
-                while True:
-                    chunk = await output_queue.get()
+                try:
+                    while True:
+                        try:
+                            # Use timeout to allow checking for cancellation
+                            chunk = await asyncio.wait_for(output_queue.get(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
 
-                    try:
-                        # Send audio chunk
-                        if not chunk.is_final:
-                            await websocket.send_bytes(chunk.audio_data)
-                        else:
-                            # Send completion marker
-                            await websocket.send_json({
-                                'type': 'synthesis_complete',
-                                'chunk_id': chunk.chunk_id
-                            })
+                        try:
+                            # Send audio chunk
+                            if not chunk.is_final:
+                                await websocket.send_bytes(chunk.audio_data)
+                            else:
+                                # Send completion marker
+                                await websocket.send_json({
+                                    'type': 'synthesis_complete',
+                                    'chunk_id': chunk.chunk_id
+                                })
 
-                    except WebSocketDisconnect:
-                        break
-                    except Exception as e:
-                        logger.error(
-                            "send_error",
-                            connection_id=conn_id,
-                            error=str(e)
-                        )
-                        break
+                        except WebSocketDisconnect:
+                            break
+                        except Exception as e:
+                            logger.error(
+                                "send_error",
+                                connection_id=conn_id,
+                                error=str(e)
+                            )
+                            break
+                except asyncio.CancelledError:
+                    pass
 
-            # Run both tasks
-            await asyncio.gather(receive_requests(), send_audio())
+            # Run both tasks, cancel the other when one finishes
+            receive_task = asyncio.create_task(receive_requests())
+            send_task = asyncio.create_task(send_audio())
+
+            done, pending = await asyncio.wait(
+                [receive_task, send_task],
+                return_when=asyncio.FIRST_COMPLETED
+            )
+
+            # Cancel any remaining tasks
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         except WebSocketDisconnect:
             logger.info("connection_closed", connection_id=conn_id)
